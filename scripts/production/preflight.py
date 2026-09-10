@@ -40,8 +40,6 @@ def _check_gemini(api_key: str | None) -> PreflightCheck:
     if not api_key:
         return PreflightCheck("gemini", False, "GEMINI_API_KEY is not set")
     try:
-        from google.genai import errors
-
         from scripts.production.providers.llm import GeminiProvider
 
         GeminiProvider(api_key).ping()
@@ -90,18 +88,30 @@ def _check_telegram(bot_token: str | None, chat_id: str | None) -> PreflightChec
 
 
 def _safe_error_message(exc: Exception) -> str:
-    """A short, credential-safe description of a preflight failure.
+    """A short, credential-safe description of a preflight failure that
+    always names the underlying exception class, so e.g. an auth failure,
+    a timeout, and a malformed response are never all reported identically.
 
-    Prefers a provider's own documented safe message field (e.g.
-    google.genai.errors.APIError.message, which comes from the API's own
-    JSON error body) and otherwise falls back to only the exception's type
-    name -- never the raw str(exc), which can include request URLs/headers
-    for lower-level transport exceptions.
+    For this package's own exception types (GeminiPingError,
+    ScriptGenerationError) the full message is safe to include verbatim --
+    it is built only from the provider's own status/error fields (see
+    providers/llm.py::_describe_incomplete_interaction), never from request
+    URLs or credentials. For everything else, prefers a provider's own
+    documented safe message field (e.g. google.genai.errors.APIError.message,
+    which comes from the API's own JSON error body) and otherwise falls back
+    to just the exception's type name -- never the raw str(exc), which can
+    include request URLs/headers for lower-level transport exceptions.
     """
+    from scripts.production.providers.llm import GeminiPingError, ScriptGenerationError
+
+    class_name = type(exc).__name__
+    if isinstance(exc, (GeminiPingError, ScriptGenerationError)):
+        return f"{class_name}: {exc}"
+
     message = getattr(exc, "message", None)
     if isinstance(message, str) and message:
-        return message
-    return type(exc).__name__
+        return f"{class_name}: {message}"
+    return class_name
 
 
 def run_preflight(

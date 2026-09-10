@@ -95,6 +95,53 @@ def test_gemini_failure_with_a_present_key_never_leaks_the_key(monkeypatch):
     assert fake_key not in str(exc_info.value)
 
 
+def test_gemini_failure_message_includes_the_exception_class_name(monkeypatch):
+    """Regression guard: preflight must not collapse every Gemini failure
+    into an undifferentiated message -- the underlying exception class
+    (e.g. a real connectivity/auth error type) must be visible."""
+
+    def _boom(self):
+        raise RuntimeError("simulated auth failure")
+
+    monkeypatch.setattr("scripts.production.providers.llm.GeminiProvider.__init__", lambda self, api_key, model="x": None)
+    monkeypatch.setattr("scripts.production.providers.llm.GeminiProvider.ping", _boom)
+
+    with pytest.raises(PreflightError) as exc_info:
+        run_preflight(
+            gemini_api_key="present",
+            pexels_api_key=None,
+            pixabay_api_key=None,
+            telegram_bot_token=None,
+            telegram_chat_id=None,
+        )
+    assert "RuntimeError" in str(exc_info.value)
+
+
+def test_gemini_ping_error_message_passes_through_verbatim(monkeypatch):
+    """GeminiPingError's own message is built only from safe provider status/
+    error fields (see providers/llm.py), so preflight can and should surface
+    it in full rather than collapsing it to just the class name."""
+    from scripts.production.providers.llm import GeminiPingError
+
+    def _boom(self):
+        raise GeminiPingError("Gemini interaction did not complete successfully (status=failed): quota exceeded")
+
+    monkeypatch.setattr("scripts.production.providers.llm.GeminiProvider.__init__", lambda self, api_key, model="x": None)
+    monkeypatch.setattr("scripts.production.providers.llm.GeminiProvider.ping", _boom)
+
+    with pytest.raises(PreflightError) as exc_info:
+        run_preflight(
+            gemini_api_key="present",
+            pexels_api_key=None,
+            pixabay_api_key=None,
+            telegram_bot_token=None,
+            telegram_chat_id=None,
+        )
+    message = str(exc_info.value)
+    assert "GeminiPingError" in message
+    assert "quota exceeded" in message
+
+
 def test_telegram_failure_with_present_credentials_never_leaks_token(monkeypatch):
     fake_token = "123456:fake-telegram-token-should-not-leak"
 

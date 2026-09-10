@@ -107,12 +107,41 @@ asked to be relaxed, but a hard stop here would defeat the milestone's purpose o
 
 ## Gemini (Script Agent)
 
-`providers/llm.py::GeminiProvider` uses the official `google-genai` SDK (`gemini-3.6-flash` by
-default), requesting `response_mime_type="application/json"` for structured output. The prompt
-(`build_script_prompt`) embeds the candidate's title/pillar/role/monetization path/summary, the
-Research Agent scoring reasoning, and every evidence item from `raw_metadata["evidence"]` (see
-docs/RESEARCH_AGENT.md "Evidence") -- the model is instructed to ground claims in that evidence and
-never invent specifics beyond it.
+`providers/llm.py::GeminiProvider` uses the official `google-genai` SDK's **Interactions API**
+(`client.interactions.create(...)`, `gemini-3.6-flash` by default via the single
+`DEFAULT_GEMINI_MODEL` constant) -- not `client.models.generate_content`. That older path's
+automatic function calling (AFC) machinery fired even for a plain text-only prompt with no tools
+configured, which could return an empty response and get misreported as a generic
+`ScriptGenerationError` with no indication anything AFC-related was involved. Interactions has no
+client-side AFC concept: tools are explicit, opt-in server-side declarations that this provider
+never passes, so `ping()` (preflight) and `generate_script()` (below) both have a call shape you
+can literally inspect for the absence of a `tools`/`response_format` key (see
+`tests/production/test_gemini_provider.py`).
+
+Structured output goes through `response_format={"type": "text", "mime_type": "application/json",
+"schema": SCRIPT_JSON_SCHEMA}` (a plain JSON Schema dict) -- enforced server-side, on top of (not
+instead of) the prompt's own JSON-shape instructions, since a schema alone can't express semantic
+rules like scene count or word-count targets. `"schema"` is the key the current official
+Interactions API documentation specifies and the key the SDK actually serializes onto the wire
+regardless of input (confirmed against the installed `google-genai` SDK's own request-validation
+model in `tests/production/test_gemini_provider.py`, not just this codebase's own tests). The
+prompt (`build_script_prompt`) embeds the candidate's
+title/pillar/role/monetization path/summary, the Research Agent scoring reasoning, and every
+evidence item from `raw_metadata["evidence"]` (see docs/RESEARCH_AGENT.md "Evidence") -- the model
+is instructed to ground claims in that evidence and never invent specifics beyond it.
+
+**Gemini preflight.** `GeminiProvider.ping()` sends nothing beyond `model` and a fixed prompt
+("Reply exactly with OK") -- no tools, no response schema -- specifically so a plain
+connectivity/auth failure is never confused with a structured-output or tool-calling problem.
+Both `ping()` and `generate_script()` read `interaction.output_text` (the SDK's own "concatenated
+text from the last model output" convenience field); if it is empty, the failure reason comes from
+the interaction's own `status` and `errors[].message` (both provider-supplied, safe to log in
+full -- see `_describe_incomplete_interaction`), not a guess. A ping failure raises
+`GeminiPingError`; a script-generation failure raises `ScriptGenerationError` -- two distinct
+exception types, so `preflight.py` never reports a connectivity problem as if it were a script
+validation problem, and vice versa. `preflight.py::_safe_error_message` always names the
+underlying exception's class alongside whatever safe message is available, instead of collapsing
+every Gemini failure into one indistinguishable string.
 
 **Fabrication guard.** The prompt instructs Gemini never to state a specific FPS number, price,
 exact spec, release date, popularity statistic, or performance percentage unless it is in the

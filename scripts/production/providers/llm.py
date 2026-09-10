@@ -39,8 +39,16 @@ _FABRICATION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 
 class ScriptGenerationError(RuntimeError):
     """Raised when Script Agent cannot produce a script that respects the
-    "never invent FPS/prices/specs/dates/popularity/performance" rule, or
-    when the LLM provider itself is unusable."""
+    "never invent FPS/prices/specs/dates/popularity/performance" rule, when
+    a structured-script Gemini call is unusable, or when its response is
+    malformed/empty."""
+
+
+class GeminiPingError(RuntimeError):
+    """Raised when the minimal preflight connectivity check (GeminiProvider.ping)
+    fails -- kept distinct from ScriptGenerationError so a preflight
+    connectivity/auth problem is never reported as if it were a structured
+    script generation problem (see preflight.py)."""
 
 
 def find_fabrication_risks(text: str) -> list[str]:
@@ -60,48 +68,109 @@ class LlmProvider:
         raise NotImplementedError
 
 
+# JSON schema for structured script output via the Interactions API's
+# response_format (see GeminiProvider.generate_script). This is enforced
+# server-side on top of -- not instead of -- _SCRIPT_JSON_INSTRUCTIONS
+# below, which also carries semantic rules (scene count, word count,
+# generic visual queries, no fabricated claims) a JSON schema cannot
+# express.
+SCRIPT_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "description": {"type": "string"},
+        "hook": {"type": "string"},
+        "scenes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "narration_line": {"type": "string"},
+                    "on_screen_text": {"type": "string"},
+                    "visual_search_queries": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["narration_line"],
+            },
+        },
+        "evidence_references": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["title", "description", "hook", "scenes"],
+}
+
+_PING_PROMPT = "Reply exactly with OK"
+
+# Statuses the Interactions API can return without ever raising a Python
+# exception (see google.genai.interactions.InteractionStatus) -- anything
+# other than "completed" means there is no usable output_text, and the
+# reason should come from the interaction's own `errors`, not a guess.
+_INTERACTION_FAILURE_HINT = "did not complete successfully"
+
+
+def _describe_incomplete_interaction(interaction: Any) -> str:
+    """A safe, useful description of why an Interaction has no output_text.
+
+    Uses only the interaction's own status and error messages (both
+    provider-supplied, never request/credential data) -- see
+    preflight.py's "never print secret values" rule.
+    """
+    status = getattr(interaction, "status", "unknown")
+    errors = getattr(interaction, "errors", None) or []
+    messages = [error.message for error in errors if getattr(error, "message", None)]
+    if messages:
+        return f"Gemini interaction {_INTERACTION_FAILURE_HINT} (status={status}): {'; '.join(messages)}"
+    return f"Gemini interaction {_INTERACTION_FAILURE_HINT} (status={status}) with no output text"
+
+
 class GeminiProvider(LlmProvider):
-    """Google Gemini, via the official google-genai SDK."""
+    """Google Gemini, via the official google-genai SDK's Interactions API
+    (client.interactions.create) -- not the older Models.generate_content,
+    whose automatic function calling (AFC) machinery was firing even for a
+    plain text-only prompt with no tools configured (see
+    docs/PRODUCTION_PIPELINE.md "Gemini preflight" for the incident this
+    fixed). Interactions has no client-side AFC concept at all: tools are
+    explicit server-side declarations (google.genai.interactions.Tool) that
+    this provider never passes.
+    """
 
-    def __init__(self, api_key: str, model: str = DEFAULT_GEMINI_MODEL) -> None:
-        # Imported lazily so importing this module (e.g. for the fabrication
-        # guard alone, in tests) never requires the google-genai package to
-        # be configured with a real key.
-        from google import genai
+    def __init__(self, api_key: str, model: str = DEFAULT_GEMINI_MODEL, client: Any = None) -> None:
+        if client is None:
+            # Imported lazily so importing this module (e.g. for the
+            # fabrication guard alone, in tests) never requires the
+            # google-genai package to be configured with a real key.
+            from google import genai
 
-        self._client = genai.Client(api_key=api_key)
+            client = genai.Client(api_key=api_key)
+        self._client = client
         self._model = model
 
     def generate_script(self, prompt: str) -> str:
-        from google.genai import types
-
-        response = self._client.models.generate_content(
+        interaction = self._client.interactions.create(
             model=self._model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.4,
-                response_mime_type="application/json",
-            ),
+            input=prompt,
+            response_format={
+                "type": "text",
+                "mime_type": "application/json",
+                "schema": SCRIPT_JSON_SCHEMA,
+            },
         )
-        if not response.text:
-            raise ScriptGenerationError("Gemini returned an empty response")
-        return response.text
+        text = getattr(interaction, "output_text", None)
+        if not text:
+            raise ScriptGenerationError(_describe_incomplete_interaction(interaction))
+        return text
 
     def ping(self) -> None:
-        """Minimal, cheap connectivity/auth check used by preflight.py.
+        """Minimal, tools-free, schema-free text-only connectivity check
+        used by preflight.py.
 
-        Raises on any failure; callers should not try to interpret the
-        response content, only whether the call succeeded.
+        Deliberately passes nothing beyond model + input: no tools, no
+        automatic function calling, no response_format/JSON schema -- so a
+        plain connectivity/auth failure can never be confused with (or
+        masked by) a structured-output or tool-calling problem.
         """
-        from google.genai import types
-
-        response = self._client.models.generate_content(
-            model=self._model,
-            contents="Reply with exactly one word: OK",
-            config=types.GenerateContentConfig(temperature=0.0, max_output_tokens=16),
-        )
-        if not response.text:
-            raise ScriptGenerationError("Gemini preflight ping returned an empty response")
+        interaction = self._client.interactions.create(model=self._model, input=_PING_PROMPT)
+        text = getattr(interaction, "output_text", None)
+        if not text:
+            raise GeminiPingError(_describe_incomplete_interaction(interaction))
 
 
 _SCRIPT_JSON_INSTRUCTIONS = """
