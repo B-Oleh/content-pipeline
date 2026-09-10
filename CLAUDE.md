@@ -87,20 +87,29 @@ budget stage — this restricts what pipeline *runtime* code calls, not the use 
 the development assistant building this repository. Introducing or switching to any paid provider
 follows the "API integrations" approval rule below regardless of which concern it fills.
 
+LLM (Gemini), visual asset (Pexels/Pixabay), and voice/TTS (edge-tts) providers are implemented
+under `scripts/production/providers/` (see docs/PRODUCTION_PIPELINE.md) — each a small interface
+plus one concrete implementation, per the pattern above. The publisher and analytics provider
+concerns are not implemented yet.
+
 ## Cloud execution and budget
 
 The single place for cloud/CI rules — do not restate these elsewhere.
 
-- GitHub Actions is the cloud execution environment for running the pipeline. A manually
-  triggered (`workflow_dispatch` only) workflow exists for Research Agent
-  (`.github/workflows/research_agent.yml`; see docs/RESEARCH_AGENT.md "GitHub Actions workflow")
-  to prove the agent runs end-to-end on a real runner and that persistent state survives across
-  runs. No other pipeline stage has a workflow yet.
+- GitHub Actions is the cloud execution environment for running the pipeline. Two manually
+  triggered (`workflow_dispatch` only) workflows exist:
+  `.github/workflows/research_agent.yml` (see docs/RESEARCH_AGENT.md "GitHub Actions workflow"),
+  which proves Research Agent runs end-to-end and persistent state survives across runs; and
+  `.github/workflows/produce_video.yml` (see docs/PRODUCTION_PIPELINE.md "GitHub Actions
+  workflow"), which proves one real video reaches Telegram. Neither has a schedule.
 - The system must run within a strict $0 operating budget while in Stage 1 of the business
-  strategy (see [`docs/BUSINESS_STRATEGY.md`](docs/BUSINESS_STRATEGY.md)).
+  strategy (see [`docs/BUSINESS_STRATEGY.md`](docs/BUSINESS_STRATEGY.md)). Gemini, Pexels,
+  Pixabay, and edge-tts are all used on their free tiers/no-cost access — see
+  docs/PRODUCTION_PIPELINE.md for which is which.
 - Any credential a GitHub Actions workflow needs is stored in GitHub Secrets, never committed
-  (see "Environment variables and secret handling"). The Research Agent workflow currently needs
-  none.
+  (see "Environment variables and secret handling"). `produce_video.yml` needs
+  `GEMINI_API_KEY`, `PEXELS_API_KEY`, `PIXABAY_API_KEY`, `TELEGRAM_BOT_TOKEN`, and
+  `TELEGRAM_CHAT_ID`; `research_agent.yml` needs none.
 - No paid service may be enabled in CI or anywhere else without explicit user approval (see "API
   integrations") — the $0 budget is the default, not a target to negotiate down from.
 - Do not add scheduling or large-scale automation until the MVP is stable (see "Current
@@ -132,6 +141,18 @@ The core pipeline, in order:
 11. Publishing
 12. Analytics
 13. Learning feedback loop
+
+Stage 1 has a full implementation (see docs/RESEARCH_AGENT.md). Stages 4-9, plus the video-delivery
+half of stage 10 (sending the rendered MP4 — not yet the Approve/Regenerate/Reject buttons), have a
+first working implementation under `scripts/production/` (see docs/PRODUCTION_PIPELINE.md); Visual
+Planner's shot-list responsibility is folded into Script Agent's structured Gemini output rather
+than a separate stage/module, since one LLM call producing both narration and per-scene visual
+queries avoids a redundant second call. Stages 2-3 (Opportunity Scoring, Fact Checking) as
+standalone stages are not implemented as separate modules — Opportunity Scoring is Research
+Agent's existing ranking (see docs/RESEARCH_AGENT.md "Ranking formula"), and Fact Checking is
+currently only the automated fabrication-claim guard inside Script Agent (see
+docs/PRODUCTION_PIPELINE.md "Gemini (Script Agent)"), not a fully independent verification stage.
+Stages 11-13 are not implemented.
 
 ### Research and opportunity scoring rules
 
@@ -232,8 +253,12 @@ Publishing stage, the bot must eventually present:
 
 with three actions: ✅ Approve, 🔄 Regenerate, ❌ Reject. Public publishing must never happen
 before an explicit Approve. Telegram notifications must follow the event-driven rule in "Cloud
-execution and budget" (no polling from GitHub Actions). This stage is not yet implemented — see
-"Current development stage" and "Human approval required" below, which apply until it exists.
+execution and budget" (no polling from GitHub Actions). Sending the rendered video with a caption
+(topic, title, content role, selection reasoning, research score) is implemented (see
+docs/PRODUCTION_PIPELINE.md "Telegram delivery"); the Approve/Regenerate/Reject buttons and any
+webhook/callback handling are not — nothing currently gates on them, so there is no publishing
+stage yet for them to gate. "Current development stage" and "Human approval required" below apply
+until that gate exists: nothing downstream of Telegram delivery publishes anywhere automatically.
 
 ### Analytics and learning feedback loop
 

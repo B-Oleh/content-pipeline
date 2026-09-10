@@ -1,0 +1,88 @@
+# Manually triggered end-to-end video production run: Research -> Script
+# (Gemini) -> Assets (Pexels/Pixabay) -> Voice (edge-tts) -> Subtitles ->
+# Render (ffmpeg) -> QA -> Telegram delivery. See
+# docs/PRODUCTION_PIPELINE.md for the full design.
+#
+# workflow_dispatch ONLY -- no schedule/cron/repository_dispatch (see
+# CLAUDE.md "Cloud execution and budget"). This proves the full pipeline
+# produces one real MP4 delivered to Telegram; it does not automate
+# publishing or scheduling.
+name: Produce Video (manual)
+
+on:
+  workflow_dispatch: {}
+
+# This workflow never writes to the repository (no state/ changes, no
+# committed video -- see "Do not commit generated video to Git" in
+# docs/PRODUCTION_PIPELINE.md), so it only needs read access.
+permissions:
+  contents: read
+
+# Simplest reasonable protection against two production runs racing for the
+# same Telegram chat / API quota at once -- see CLAUDE.md-style concurrency
+# guard already used in research_agent.yml. A second manual run started
+# while one is in progress queues rather than running in parallel.
+concurrency:
+  group: produce-video
+  cancel-in-progress: false
+
+jobs:
+  produce:
+    runs-on: ubuntu-latest
+    # A full render (network downloads + TTS + ffmpeg encode) can run
+    # longer than the default 6h is irrelevant, but a stuck/hanging step
+    # (e.g. an API call with no timeout) should not burn the whole budget.
+    timeout-minutes: 30
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+      PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Ensure ffmpeg is installed
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg
+          fi
+          ffmpeg -version
+          ffprobe -version
+
+      - name: Run automated test suite
+        run: pytest
+
+      - name: Preflight -- verify secrets and service connectivity
+        run: python -m scripts.production.preflight
+
+      - name: Run video production pipeline (research -> script -> assets -> voice -> subtitles -> render -> QA -> Telegram)
+        run: python -m scripts.produce_video
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: produce-video-diagnostics-${{ github.run_number }}
+          # Intermediate script/QA/asset files only -- no secrets are ever
+          # written to disk or logged anywhere in this pipeline (see
+          # docs/PRODUCTION_PIPELINE.md "Secrets"), and the video itself
+          # (if it got far enough to render) is included here purely for
+          # debugging -- this is diagnostic-only, not published anywhere.
+          path: |
+            data/production/
+            output/
+            logs/
+          retention-days: 3
+          if-no-files-found: warn

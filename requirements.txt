@@ -1,2 +1,11 @@
 python-dotenv>=1.0.0
 pytest>=8.0.0
+
+# Production pipeline (Script Agent / Asset Acquisition / Voice / Telegram delivery).
+# requests: Pexels/Pixabay JSON APIs and Telegram Bot API (incl. multipart video upload) --
+#   the standard library alternative would mean hand-rolling multipart/form-data encoding.
+# google-genai: official current Gemini SDK (see scripts/production/providers/llm.py).
+# edge-tts: free Microsoft Edge text-to-speech, used for narration + word-level timing.
+requests>=2.31.0
+google-genai>=1.0.0
+edge-tts>=6.1.0
