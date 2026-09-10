@@ -1,0 +1,20 @@
+{
+  "sources": [
+    {
+      "type": "fixture",
+      "name": "fixture_sample_v1",
+      "enabled": true,
+      "path": "scripts/research/config/fixture_candidates.json"
+    },
+    {
+      "type": "rss",
+      "name": "pcgamer_rss",
+      "enabled": true,
+      "feed_url": "https://www.pcgamer.com/rss/",
+      "default_content_pillar": "gaming_technology",
+      "default_content_role": "growth",
+      "max_items": 15,
+      "timeout": 10.0
+    }
+  ]
+}

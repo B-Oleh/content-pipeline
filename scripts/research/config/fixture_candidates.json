@@ -1,0 +1,99 @@
+[
+  {
+    "candidate_id": "fixture:budget-mouse-2026",
+    "title": "Best budget gaming mice under $30 in 2026",
+    "content_pillar": "buying_advice",
+    "content_role": "hybrid",
+    "monetization_path": "gaming mouse affiliate links",
+    "summary": "Roundup of well-reviewed budget gaming mice for viewers upgrading on a tight budget.",
+    "raw_metadata": {}
+  },
+  {
+    "candidate_id": "fixture:rtx4060-vs-4060ti",
+    "title": "RTX 4060 vs RTX 4060 Ti: which should you buy in 2026?",
+    "content_pillar": "hardware_comparison",
+    "content_role": "revenue",
+    "monetization_path": "GPU affiliate links",
+    "summary": "Side-by-side comparison to help viewers decide between two similarly priced GPUs.",
+    "raw_metadata": {}
+  },
+  {
+    "candidate_id": "fixture:windows-fps-settings",
+    "title": "5 Windows settings that instantly boost your FPS",
+    "content_pillar": "optimization",
+    "content_role": "growth",
+    "monetization_path": "audience growth only",
+    "summary": "Practical, verifiable Windows/game settings changes -- no fabricated FPS numbers.",
+    "raw_metadata": {}
+  },
+  {
+    "candidate_id": "fixture:dlss-vs-fsr-vs-xess",
+    "title": "DLSS vs FSR vs XeSS explained simply",
+    "content_pillar": "gaming_technology",
+    "content_role": "growth",
+    "monetization_path": null,
+    "summary": "Plain-language explainer of upscaling technologies without hardware-specific claims.",
+    "raw_metadata": {}
+  },
+  {
+    "candidate_id": "fixture:gpu-buying-myths",
+    "title": "3 GPU buying myths that waste your money",
+    "content_pillar": "mistakes_and_myths",
+    "content_role": "hybrid",
+    "monetization_path": "follow-up hardware upgrade content",
+    "summary": "Debunks common misconceptions viewers have when shopping for a GPU.",
+    "raw_metadata": {}
+  },
+  {
+    "candidate_id": "fixture:monthly-low-end-hades2",
+    "title": "Is Hades II worth playing on a low-end PC this month?",
+    "content_pillar": "monthly_games",
+    "content_role": "growth",
+    "monetization_path": "follow-up hardware upgrade content",
+    "hardware_tier": "low_end",
+    "target_gpu_class": "GTX 1650 class",
+    "game_price_type": "paid",
+    "release_relevance": "recent",
+    "game_title": "Hades II",
+    "summary": "Monthly low-end-PC recommendation slot.",
+    "raw_metadata": {}
+  },
+  {
+    "candidate_id": "fixture:monthly-low-end-free-pick",
+    "title": "Best free game to try this month on a low-end PC",
+    "content_pillar": "monthly_games",
+    "content_role": "growth",
+    "monetization_path": "audience growth only",
+    "hardware_tier": "low_end",
+    "target_gpu_class": "integrated graphics class",
+    "game_price_type": "free",
+    "release_relevance": "evergreen",
+    "game_title": "Team Fortress 2",
+    "summary": "Free-to-play pick aimed at the widest possible low-end-PC audience.",
+    "raw_metadata": {}
+  },
+  {
+    "candidate_id": "fixture:monthly-high-end-cyberpunk",
+    "title": "What to play this month on a high-end PC: Cyberpunk 2077",
+    "content_pillar": "monthly_games",
+    "content_role": "hybrid",
+    "monetization_path": "follow-up hardware upgrade content",
+    "hardware_tier": "high_end",
+    "target_gpu_class": "RTX 4070 class",
+    "game_price_type": "paid",
+    "release_relevance": "evergreen",
+    "game_title": "Cyberpunk 2077",
+    "summary": "Showcases a visually demanding evergreen title for viewers with strong hardware.",
+    "raw_metadata": {}
+  },
+  {
+    "candidate_id": "fixture:mid-range-budget-build",
+    "title": "Best mid-range PC build for 1080p gaming this quarter",
+    "content_pillar": "buying_advice",
+    "content_role": "revenue",
+    "monetization_path": "GPU affiliate links",
+    "hardware_tier": "mid_range",
+    "summary": "Component list aimed at viewers assembling a new mid-range PC.",
+    "raw_metadata": {}
+  }
+]
