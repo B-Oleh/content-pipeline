@@ -17,7 +17,7 @@ from scripts.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
 
 # The most concretely fabricable "hard numbers" this niche's rules forbid
 # inventing (see CLAUDE.md "Fact checking" and "Research and opportunity

@@ -107,7 +107,7 @@ asked to be relaxed, but a hard stop here would defeat the milestone's purpose o
 
 ## Gemini (Script Agent)
 
-`providers/llm.py::GeminiProvider` uses the official `google-genai` SDK (`gemini-2.5-flash` by
+`providers/llm.py::GeminiProvider` uses the official `google-genai` SDK (`gemini-3.6-flash` by
 default), requesting `response_mime_type="application/json"` for structured output. The prompt
 (`build_script_prompt`) embeds the candidate's title/pillar/role/monetization path/summary, the
 Research Agent scoring reasoning, and every evidence item from `raw_metadata["evidence"]` (see
