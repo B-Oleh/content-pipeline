@@ -18,8 +18,7 @@ All scores use a 0-10 scale: 0 = worst/none, 10 = best/most.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
+from scripts.research import freshness as freshness_module
 from scripts.research.models import (
     SCORE_DIMENSIONS,
     ContentPillar,
@@ -104,35 +103,28 @@ def _affiliate_potential(candidate: ResearchCandidate) -> float:
 
 
 def _freshness(candidate: ResearchCandidate) -> float:
+    """Delegates to freshness.py so scoring and the explicit freshness tier
+    (see docs/RESEARCH_AGENT.md "Freshness") never fall out of sync."""
     published_at_raw = candidate.raw_metadata.get("published_at") if candidate.raw_metadata else None
-    if not published_at_raw:
-        # No verified publish date available -- neutral default, not a guess at recency.
-        return 5.0
-    try:
-        published_at = datetime.fromisoformat(published_at_raw)
-    except (TypeError, ValueError):
-        return 5.0
-    if published_at.tzinfo is None:
-        published_at = published_at.replace(tzinfo=timezone.utc)
-    age_days = (datetime.now(timezone.utc) - published_at).total_seconds() / 86400
-    if age_days <= 2:
-        return 9.0
-    if age_days <= 7:
-        return 7.0
-    if age_days <= 30:
-        return 5.0
-    return 3.0
+    tier, _age_days = freshness_module.classify_published_at(published_at_raw)
+    return freshness_module.freshness_score(tier)
 
 
 def _confidence(candidate: ResearchCandidate) -> float:
     """Editorial confidence, not statistical confidence -- there is no real data yet.
 
     Curated fixture candidates carry more editorial confidence than an
-    unverified, unfact-checked RSS headline.
+    unverified, unfact-checked RSS headline. A candidate corroborated by
+    more than one independent source (see dedup.py -- raw_metadata
+    ["evidence"] gains one entry per source reporting the same story) gets a
+    modest, capped bump: multiple independent sources reporting the same
+    story is genuine evidence of current relevance, not a guess.
     """
-    if candidate.source_name.startswith("fixture"):
-        return 6.0
-    return 3.5
+    base = 6.0 if candidate.source_name.startswith("fixture") else 3.5
+    evidence_count = len((candidate.raw_metadata or {}).get("evidence", []))
+    if evidence_count >= 2:
+        base += 1.5
+    return min(base, 10.0)
 
 
 def score_candidate(candidate: ResearchCandidate) -> ScoreBreakdown:

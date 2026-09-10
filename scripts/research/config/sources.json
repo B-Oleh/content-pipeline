@@ -15,6 +15,26 @@
       "default_content_role": "growth",
       "max_items": 15,
       "timeout": 10.0
+    },
+    {
+      "type": "rss",
+      "name": "rockpapershotgun_rss",
+      "enabled": true,
+      "feed_url": "https://www.rockpapershotgun.com/feed",
+      "default_content_pillar": "game_recommendations",
+      "default_content_role": "growth",
+      "max_items": 15,
+      "timeout": 10.0
+    },
+    {
+      "type": "rss",
+      "name": "eurogamer_rss",
+      "enabled": true,
+      "feed_url": "https://www.eurogamer.net/feed",
+      "default_content_pillar": "gaming_technology",
+      "default_content_role": "growth",
+      "max_items": 15,
+      "timeout": 10.0
     }
   ]
 }

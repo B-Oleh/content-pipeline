@@ -67,3 +67,29 @@ def test_fixture_source_raises_for_missing_file(tmp_path):
     source = FixtureResearchSource(name="fixture_test", path=tmp_path / "does_not_exist.json")
     with pytest.raises(FileNotFoundError):
         source.fetch()
+
+
+def test_fixture_source_sets_retrieved_at(tmp_path):
+    fixture_path = tmp_path / "candidates.json"
+    fixture_path.write_text(
+        json.dumps(
+            [{"title": "A topic", "content_pillar": "buying_advice", "content_role": "growth"}]
+        ),
+        encoding="utf-8",
+    )
+    source = FixtureResearchSource(name="fixture_test", path=fixture_path)
+
+    candidates = source.fetch()
+
+    assert candidates[0].raw_metadata.get("retrieved_at") is not None
+
+
+def test_fixture_source_raises_for_invalid_json_syntax(tmp_path):
+    import pytest
+
+    fixture_path = tmp_path / "candidates.json"
+    fixture_path.write_text("{not valid json", encoding="utf-8")
+    source = FixtureResearchSource(name="fixture_test", path=fixture_path)
+
+    with pytest.raises(json.JSONDecodeError):
+        source.fetch()

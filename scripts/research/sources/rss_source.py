@@ -24,9 +24,15 @@ logger = get_logger(__name__)
 
 Fetcher = Callable[[str, float], bytes]
 
+# Identifies this project to the servers whose public feeds it reads. Not a
+# spoofed browser user agent -- some feed hosts otherwise reject or
+# rate-limit the default urllib identifier.
+_USER_AGENT = "content-pipeline-research-agent/0.2"
+
 
 def _default_fetcher(url: str, timeout: float) -> bytes:
-    with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310 (public RSS feed)
+    request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 (public RSS feed)
         return response.read()
 
 
@@ -58,6 +64,7 @@ class RssResearchSource(ResearchSource):
     def _parse(self, raw: bytes) -> list[ResearchCandidate]:
         root = ET.fromstring(raw)
         items = root.findall("./channel/item")
+        retrieved_at = datetime.now(timezone.utc).isoformat()
         candidates: list[ResearchCandidate] = []
         for index, item in enumerate(items[: self.max_items]):
             title = _text(item.find("title"))
@@ -78,6 +85,7 @@ class RssResearchSource(ResearchSource):
                     summary=summary,
                     raw_metadata={
                         "published_at": published_at.isoformat() if published_at else None,
+                        "retrieved_at": retrieved_at,
                     },
                 )
             )

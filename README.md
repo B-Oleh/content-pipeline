@@ -12,7 +12,7 @@ complete pipeline stage list, and engineering rules live in [CLAUDE.md](CLAUDE.m
 the source of truth for architecture and process.
 
 The repository is currently an early scaffold. The first functional pipeline stage, **Research
-Agent V0.1**, is implemented — see "Running Research Agent V0.1" below and
+Agent** (V0.2), is implemented — see "Running Research Agent" below and
 [docs/RESEARCH_AGENT.md](docs/RESEARCH_AGENT.md) for its design. No other pipeline stage or
 external API integration has been implemented yet.
 
@@ -24,13 +24,14 @@ duplicating it.
 ```
 scripts/            Python automation and pipeline code
   config.py           Shared configuration and directory paths
-  research_agent.py   CLI entry point for Research Agent V0.1
-  research/            Research Agent V0.1 package (models, scoring, ranking, sources, persistence)
+  research_agent.py   CLI entry point for Research Agent
+  research/            Research Agent package (models, scoring, ranking, sources, persistence)
     sources/             Research source implementations (fixture, RSS)
+    state/               Persistent pipeline state primitive (JsonListStore)
     config/              Source configuration and fixture data (JSON)
-  utils/              Shared helper modules (e.g. logging)
+  utils/              Shared helper modules (e.g. logging, atomic file writes)
 tests/              Automated tests (pytest)
-  research/           Tests for Research Agent V0.1
+  research/           Tests for Research Agent
 data/               Structured pipeline data (topics, scripts, metadata) — git-ignored
 assets/             Downloaded/generated production assets (footage, images, audio) — git-ignored
 output/             Finished rendered videos — git-ignored
@@ -73,31 +74,39 @@ Prerequisites: Python 3.11+.
    pytest
    ```
 
-## Running Research Agent V0.1
+## Running Research Agent
 
-Research Agent V0.1 collects candidate gaming-content topics, scores them, ranks them, and
-persists the results. It requires no API keys or paid services. See
+Research Agent collects candidate gaming-content topics from several no-cost sources (a
+deterministic fixture plus real publisher RSS feeds), deduplicates and scores them, ranks them,
+and persists the results. It requires no API keys or paid services. See
 [docs/RESEARCH_AGENT.md](docs/RESEARCH_AGENT.md) for the full design (data model, scoring
-dimensions, ranking formula, source configuration).
+dimensions, ranking formula, deduplication, source health, freshness, source configuration).
 
 ```bash
 python -m scripts.research_agent
 ```
 
-This writes `research_results.json` (structured data) and `summary.md` (human-readable) to
-`data/research/YYYY-MM-DD/`, and appends any monthly-game recommendations to
-`data/research/game_history.json`.
+This writes `research_results.json` (structured data) and `summary.md` (human-readable,
+including per-source health and a degraded-run warning when too many sources failed) to
+`data/research/YYYY-MM-DD/`, and updates the persistent game-recommendation history at
+`data/research/state/game_history.json` (used to penalize recommending the same game again too
+soon — see docs/RESEARCH_AGENT.md "Game history repetition").
 
 Options:
 
 ```bash
-python -m scripts.research_agent --config path/to/sources.json --output-dir path/to/output
+python -m scripts.research_agent --config path/to/sources.json --output-dir path/to/output --state-dir path/to/state
 ```
 
 Source configuration (which feeds/fixtures run, and their defaults) lives in
 `scripts/research/config/sources.json` — no source URLs are hard-coded in the Python logic. If a
 configured source fails (e.g. a feed is unreachable), the run continues with the remaining
-sources and logs the failure instead of aborting.
+sources and reports the failure in `summary.md` instead of aborting or hiding it.
+
+**Note:** `data/research/state/` currently lives under the gitignored `data/` directory, so it
+does not yet survive across separate GitHub Actions runs (which aren't implemented yet). See
+docs/RESEARCH_AGENT.md "Persistent state vs transient output" for the tracked gap and the options
+for closing it when GitHub Actions is introduced.
 
 ## Notes
 

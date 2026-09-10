@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from scripts.research.models import (
@@ -34,10 +35,11 @@ class FixtureResearchSource(ResearchSource):
     def fetch(self) -> list[ResearchCandidate]:
         raw = self.path.read_text(encoding="utf-8")
         items = json.loads(raw)
+        retrieved_at = datetime.now(timezone.utc).isoformat()
         candidates: list[ResearchCandidate] = []
         for index, item in enumerate(items):
             try:
-                candidates.append(self._build_candidate(index, item))
+                candidates.append(self._build_candidate(index, item, retrieved_at))
             except (KeyError, ValueError) as exc:
                 logger.warning(
                     "Skipping malformed fixture candidate at index %d in %s: %s",
@@ -47,7 +49,9 @@ class FixtureResearchSource(ResearchSource):
                 )
         return candidates
 
-    def _build_candidate(self, index: int, item: dict) -> ResearchCandidate:
+    def _build_candidate(self, index: int, item: dict, retrieved_at: str) -> ResearchCandidate:
+        raw_metadata = dict(item.get("raw_metadata", {}))
+        raw_metadata.setdefault("retrieved_at", retrieved_at)
         return ResearchCandidate(
             candidate_id=item.get("candidate_id") or f"{self.name}:{index}",
             title=item["title"],
@@ -64,5 +68,5 @@ class FixtureResearchSource(ResearchSource):
             if item.get("release_relevance")
             else None,
             game_title=item.get("game_title"),
-            raw_metadata=item.get("raw_metadata", {}),
+            raw_metadata=raw_metadata,
         )

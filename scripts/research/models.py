@@ -71,6 +71,20 @@ class ReleaseRelevance(str, Enum):
     UNKNOWN = "unknown"
 
 
+class FreshnessTier(str, Enum):
+    """How recently a source item was published -- evidence of recency only.
+
+    Not a proxy for popularity, importance, or virality (see CLAUDE.md
+    "Research and opportunity scoring rules"). See scripts/research/freshness.py
+    for the (configurable) age thresholds behind these tiers.
+    """
+
+    VERY_RECENT = "very_recent"
+    RECENT = "recent"
+    OLDER_EVERGREEN = "older_evergreen"
+    UNKNOWN = "unknown"
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -214,6 +228,10 @@ class ScoredCandidate:
     overall_score: float
     rank: Optional[int] = None
     reasoning: list[str] = field(default_factory=list)
+    # V0.2 additions -- both computed at ranking time (see ranking.py), both
+    # optional/defaulted so V0.1-persisted JSON still loads via from_dict.
+    repetition_penalty: float = 0.0
+    freshness_tier: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -222,6 +240,8 @@ class ScoredCandidate:
             "overall_score": self.overall_score,
             "rank": self.rank,
             "reasoning": self.reasoning,
+            "repetition_penalty": self.repetition_penalty,
+            "freshness_tier": self.freshness_tier,
         }
 
     @classmethod
@@ -232,6 +252,49 @@ class ScoredCandidate:
             overall_score=data["overall_score"],
             rank=data.get("rank"),
             reasoning=data.get("reasoning", []),
+            repetition_penalty=data.get("repetition_penalty", 0.0),
+            freshness_tier=data.get("freshness_tier"),
+        )
+
+
+@dataclass
+class SourceHealth:
+    """Health outcome of one source's fetch() call during one run.
+
+    Preserved so research output can report when quality is degraded because
+    too many sources failed, instead of silently returning fewer candidates
+    (see docs/RESEARCH_AGENT.md "Source health").
+    """
+
+    source_name: str
+    success: bool
+    item_count: int
+    duration_seconds: float
+    retrieved_at: str
+    error_category: Optional[str] = None
+    error_message: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source_name": self.source_name,
+            "success": self.success,
+            "item_count": self.item_count,
+            "duration_seconds": self.duration_seconds,
+            "retrieved_at": self.retrieved_at,
+            "error_category": self.error_category,
+            "error_message": self.error_message,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SourceHealth":
+        return cls(
+            source_name=data["source_name"],
+            success=data["success"],
+            item_count=data["item_count"],
+            duration_seconds=data["duration_seconds"],
+            retrieved_at=data["retrieved_at"],
+            error_category=data.get("error_category"),
+            error_message=data.get("error_message"),
         )
 
 
@@ -243,6 +306,11 @@ class ResearchResult:
     ranking_formula_version: str
     candidates: list[ScoredCandidate]
     source_errors: list[str] = field(default_factory=list)
+    # V0.2 additions -- see docs/RESEARCH_AGENT.md "Source health" and
+    # "Deduplication". Defaulted/optional so V0.1-persisted JSON still loads.
+    source_health: list[SourceHealth] = field(default_factory=list)
+    raw_candidate_count: int = 0
+    deduplicated_candidate_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -250,6 +318,9 @@ class ResearchResult:
             "ranking_formula_version": self.ranking_formula_version,
             "candidates": [sc.to_dict() for sc in self.candidates],
             "source_errors": self.source_errors,
+            "source_health": [health.to_dict() for health in self.source_health],
+            "raw_candidate_count": self.raw_candidate_count,
+            "deduplicated_candidate_count": self.deduplicated_candidate_count,
         }
 
     @classmethod
@@ -259,4 +330,7 @@ class ResearchResult:
             ranking_formula_version=data["ranking_formula_version"],
             candidates=[ScoredCandidate.from_dict(sc) for sc in data.get("candidates", [])],
             source_errors=data.get("source_errors", []),
+            source_health=[SourceHealth.from_dict(health) for health in data.get("source_health", [])],
+            raw_candidate_count=data.get("raw_candidate_count", 0),
+            deduplicated_candidate_count=data.get("deduplicated_candidate_count", 0),
         )

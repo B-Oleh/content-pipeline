@@ -75,3 +75,33 @@ def test_non_numeric_known_score_value_is_ignored_not_fatal():
     scores = score_candidate(candidate)
     assert "audience_interest" in scores.heuristic_dimensions
     assert 0.0 <= scores.audience_interest <= 10.0
+
+
+def test_corroborated_by_multiple_sources_boosts_confidence():
+    single_source = _candidate(
+        raw_metadata={"evidence": [{"source_name": "source_a"}]},
+        source_name="rss_test",
+    )
+    multi_source = _candidate(
+        raw_metadata={"evidence": [{"source_name": "source_a"}, {"source_name": "source_b"}]},
+        source_name="rss_test",
+    )
+    single_scores = score_candidate(single_source)
+    multi_scores = score_candidate(multi_source)
+    assert multi_scores.confidence > single_scores.confidence
+    assert multi_scores.confidence <= 10.0
+
+
+def test_confidence_never_exceeds_scale_even_for_fixture_plus_corroboration():
+    candidate = _candidate(
+        source_name="fixture_test",
+        raw_metadata={"evidence": [{"source_name": "a"}, {"source_name": "b"}, {"source_name": "c"}]},
+    )
+    scores = score_candidate(candidate)
+    assert scores.confidence <= 10.0
+
+
+def test_freshness_delegates_to_freshness_module_for_missing_date():
+    candidate = _candidate(raw_metadata={})
+    scores = score_candidate(candidate)
+    assert scores.freshness == 5.0  # UNKNOWN tier's score

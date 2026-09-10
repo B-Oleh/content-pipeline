@@ -12,6 +12,8 @@ import json
 from pathlib import Path
 
 from scripts.research.models import ResearchResult, ScoredCandidate
+from scripts.research.source_health import is_degraded
+from scripts.utils.atomic_write import atomic_write_text
 
 RESULTS_FILENAME = "research_results.json"
 SUMMARY_FILENAME = "summary.md"
@@ -24,10 +26,10 @@ def save_research_results(result: ResearchResult, base_dir: Path) -> tuple[Path,
     out_dir.mkdir(parents=True, exist_ok=True)
 
     json_path = out_dir / RESULTS_FILENAME
-    json_path.write_text(json.dumps(result.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+    atomic_write_text(json_path, json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
 
     md_path = out_dir / SUMMARY_FILENAME
-    md_path.write_text(render_summary_markdown(result), encoding="utf-8")
+    atomic_write_text(md_path, render_summary_markdown(result))
 
     return json_path, md_path
 
@@ -42,8 +44,13 @@ def render_summary_markdown(result: ResearchResult, top_n: int = 10) -> str:
     lines.append(f"# Research Agent results -- {result.generated_at.strftime('%Y-%m-%d %H:%M UTC')}")
     lines.append("")
     lines.append(f"Ranking formula version: `{result.ranking_formula_version}`")
-    lines.append(f"Total candidates: {len(result.candidates)}")
+    lines.append(f"Raw candidates collected: {result.raw_candidate_count}")
+    lines.append(f"Candidates after deduplication: {result.deduplicated_candidate_count}")
+    lines.append(f"Total ranked candidates: {len(result.candidates)}")
     lines.append("")
+
+    if result.source_health:
+        lines.extend(_render_source_health_section(result))
 
     if result.source_errors:
         lines.append("## Source failures")
@@ -61,6 +68,28 @@ def render_summary_markdown(result: ResearchResult, top_n: int = 10) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _render_source_health_section(result: ResearchResult) -> list[str]:
+    lines = ["## Source health", ""]
+    if is_degraded(result.source_health):
+        successes = sum(1 for health in result.source_health if health.success)
+        lines.append(
+            f"**WARNING: research quality is degraded.** Only {successes}/{len(result.source_health)} "
+            "configured source(s) succeeded in this run -- treat these results as less complete/diverse "
+            "than a healthy run."
+        )
+        lines.append("")
+    for health in result.source_health:
+        status = "OK" if health.success else f"FAILED ({health.error_category})"
+        lines.append(
+            f"- **{health.source_name}:** {status} -- {health.item_count} item(s), "
+            f"{health.duration_seconds:.2f}s, retrieved {health.retrieved_at}"
+        )
+        if not health.success and health.error_message:
+            lines.append(f"  - error: {health.error_message}")
+    lines.append("")
+    return lines
+
+
 def _render_candidate_section(scored: ScoredCandidate) -> list[str]:
     candidate = scored.candidate
     scores = scored.scores
@@ -74,6 +103,10 @@ def _render_candidate_section(scored: ScoredCandidate) -> list[str]:
         f"- **Confidence:** {scores.confidence:.1f} / 10 (heuristic: {'confidence' in scores.heuristic_dimensions})",
         f"- **Source:** {candidate.source_name}" + (f" ({candidate.source_url})" if candidate.source_url else ""),
     ]
+    if scored.freshness_tier:
+        lines.append(f"- **Freshness tier:** {scored.freshness_tier} (recency evidence only, not popularity)")
+    if scored.repetition_penalty:
+        lines.append(f"- **Repetition penalty:** -{scored.repetition_penalty:.1f}")
     if candidate.hardware_tier:
         lines.append(f"- **Hardware tier:** {candidate.hardware_tier.value}")
     if candidate.game_title:
@@ -107,6 +140,14 @@ def _render_candidate_section(scored: ScoredCandidate) -> list[str]:
 
     if candidate.summary:
         lines.append(f"- **Source summary:** {candidate.summary}")
+
+    evidence = (candidate.raw_metadata or {}).get("evidence", [])
+    if evidence:
+        lines.append(f"- **Evidence ({len(evidence)} source item(s) -- why the system believes this is current):**")
+        for entry in evidence:
+            source_name = entry.get("source_name", "unknown")
+            source_url = entry.get("source_url")
+            lines.append(f"  - {source_name}" + (f" ({source_url})" if source_url else ""))
 
     lines.append("")
     return lines

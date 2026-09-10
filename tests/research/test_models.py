@@ -7,6 +7,7 @@ from scripts.research.models import (
     ResearchResult,
     ScoreBreakdown,
     ScoredCandidate,
+    SourceHealth,
 )
 
 
@@ -106,3 +107,44 @@ def test_research_result_round_trips_through_dict():
     assert len(restored.candidates) == 1
     assert restored.candidates[0].candidate.title == candidate.title
     assert restored.candidates[0].overall_score == 6.5
+
+
+def test_scored_candidate_v01_json_without_new_fields_still_loads():
+    candidate = _valid_candidate()
+    data = {
+        "candidate": candidate.to_dict(),
+        "scores": ScoreBreakdown(**_valid_score_kwargs()).to_dict(),
+        "overall_score": 5.0,
+        "rank": 1,
+        "reasoning": [],
+    }
+    restored = ScoredCandidate.from_dict(data)
+    assert restored.repetition_penalty == 0.0
+    assert restored.freshness_tier is None
+
+
+def test_source_health_round_trips_through_dict():
+    health = SourceHealth(
+        source_name="pcgamer_rss",
+        success=False,
+        item_count=0,
+        duration_seconds=1.5,
+        retrieved_at="2026-01-01T00:00:00+00:00",
+        error_category="timeout",
+        error_message="timed out",
+    )
+    restored = SourceHealth.from_dict(health.to_dict())
+    assert restored == health
+
+
+def test_research_result_v01_json_without_new_fields_still_loads():
+    data = {
+        "generated_at": "2026-01-01T00:00:00+00:00",
+        "ranking_formula_version": "v0.1",
+        "candidates": [],
+        "source_errors": ["a: b"],
+    }
+    restored = ResearchResult.from_dict(data)
+    assert restored.source_health == []
+    assert restored.raw_candidate_count == 0
+    assert restored.deduplicated_candidate_count == 0

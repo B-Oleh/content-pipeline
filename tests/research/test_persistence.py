@@ -7,6 +7,7 @@ from scripts.research.models import (
     ResearchResult,
     ScoreBreakdown,
     ScoredCandidate,
+    SourceHealth,
 )
 from scripts.research.persistence import (
     RESULTS_FILENAME,
@@ -45,12 +46,39 @@ def _sample_result() -> ResearchResult:
         monetization_path="GPU affiliate links",
     )
     scores = ScoreBreakdown(**_score_kwargs())
-    scored = ScoredCandidate(candidate=candidate, scores=scores, overall_score=6.4, rank=1, reasoning=["audience_interest scored 7.0/10"])
+    scored = ScoredCandidate(
+        candidate=candidate,
+        scores=scores,
+        overall_score=6.4,
+        rank=1,
+        reasoning=["audience_interest scored 7.0/10"],
+        freshness_tier="recent",
+    )
     return ResearchResult(
         generated_at=datetime(2026, 3, 5, 12, 0, tzinfo=timezone.utc),
         ranking_formula_version="v0.1",
         candidates=[scored],
         source_errors=["broken_source: connection refused"],
+        source_health=[
+            SourceHealth(
+                source_name="fixture_test",
+                success=True,
+                item_count=1,
+                duration_seconds=0.05,
+                retrieved_at="2026-03-05T12:00:00+00:00",
+            ),
+            SourceHealth(
+                source_name="broken_source",
+                success=False,
+                item_count=0,
+                duration_seconds=1.2,
+                retrieved_at="2026-03-05T12:00:00+00:00",
+                error_category="network",
+                error_message="connection refused",
+            ),
+        ],
+        raw_candidate_count=2,
+        deduplicated_candidate_count=1,
     )
 
 
@@ -74,6 +102,11 @@ def test_save_and_load_round_trip(tmp_path):
     assert loaded.source_errors == result.source_errors
     assert len(loaded.candidates) == 1
     assert loaded.candidates[0].candidate.title == "Best budget GPUs under $200"
+    assert loaded.candidates[0].freshness_tier == "recent"
+    assert loaded.raw_candidate_count == 2
+    assert loaded.deduplicated_candidate_count == 1
+    assert len(loaded.source_health) == 2
+    assert loaded.source_health[1].error_category == "network"
 
 
 def test_summary_markdown_includes_key_fields():
@@ -86,3 +119,30 @@ def test_summary_markdown_includes_key_fields():
     assert "GPU affiliate links" in markdown
     assert "broken_source: connection refused" in markdown
     assert "heuristic" in markdown
+
+
+def test_summary_markdown_includes_source_health_and_degraded_warning():
+    result = _sample_result()
+    markdown = render_summary_markdown(result)
+
+    assert "Source health" in markdown
+    assert "fixture_test" in markdown
+    assert "FAILED (network)" in markdown
+    assert "WARNING: research quality is degraded" in markdown
+    assert "Raw candidates collected: 2" in markdown
+    assert "Candidates after deduplication: 1" in markdown
+
+
+def test_summary_markdown_omits_degraded_warning_when_healthy():
+    result = _sample_result()
+    result.source_health = [
+        SourceHealth(
+            source_name="fixture_test",
+            success=True,
+            item_count=1,
+            duration_seconds=0.05,
+            retrieved_at="2026-03-05T12:00:00+00:00",
+        )
+    ]
+    markdown = render_summary_markdown(result)
+    assert "WARNING: research quality is degraded" not in markdown
