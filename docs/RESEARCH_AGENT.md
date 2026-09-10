@@ -9,13 +9,20 @@ Engineering rules (secrets, dependencies, logging, testing, etc.) are defined on
 are not repeated here.
 
 Version history: **V0.1** shipped a deterministic fixture source plus one RSS source and pure
-heuristic scoring. **V0.2** (current) adds real multi-source research, source health reporting,
+heuristic scoring. **V0.2** added real multi-source research, source health reporting,
 deduplication, evidence tracking, explicit freshness tiers, and an active game-history repetition
-penalty — see the sections below for each.
+penalty. **V0.3** (current) proves the agent runs end-to-end on a real GitHub Actions runner via a
+manually triggered workflow, and moves persistent state out of the gitignored `data/` directory
+into a Git-tracked `state/` directory so it survives across separate workflow runs — see the
+sections below for each.
 
 ## Module map
 
 ```
+scripts/config.py                 STATE_DIR (state/), DATA_DIR (data/), etc. -- see "Git-backed
+                                   persistent state" below
+scripts/utils/atomic_write.py     atomic_write_text() -- used by every persistent AND transient
+                                   JSON/Markdown write in this stage
 scripts/research_agent.py         CLI entry point (python -m scripts.research_agent)
 scripts/research/
   models.py                        ResearchCandidate, ScoreBreakdown, ScoredCandidate,
@@ -25,8 +32,9 @@ scripts/research/
   freshness.py                     Explicit, configurable freshness-tier classification
   dedup.py                         Conservative per-run duplicate detection (URL / title)
   source_health.py                 Error classification + degraded-run detection
-  persistence.py                   JSON + Markdown output under data/research/YYYY-MM-DD/
+  persistence.py                   JSON + Markdown output under data/research/YYYY-MM-DD/ (transient)
   game_history.py                  Persisted, actively-used history of recommended games
+                                    (state/research/game_history.json -- persistent)
   cli.py                           Orchestration: build sources -> fetch -> dedup -> score ->
                                     rank -> save -> record
   state/
@@ -38,6 +46,8 @@ scripts/research/
   config/
     sources.json                   Which sources run, and their per-feed defaults
     fixture_candidates.json        Sample candidate data for the fixture source
+.github/workflows/research_agent.yml   Manually triggered (workflow_dispatch only) cloud run
+state/research/game_history.json  Git-tracked persistent state (see "Git-backed persistent state")
 ```
 
 ## Data model
@@ -92,15 +102,25 @@ CLAUDE.md "Game recommendation integrity").
 
 ## Persistent state vs transient output
 
-Two different lifetimes exist in this stage's output, and they are kept physically and
-conceptually separate:
+Two different lifetimes exist in this stage's output, and they are kept in two different,
+never-nested directory trees (enforced by tests -- see `tests/research/test_cli.py`):
 
-- **Transient per-run output** (`data/research/YYYY-MM-DD/research_results.json`, `summary.md`,
-  and log files under `logs/`): safe to discard after review; a new dated folder every run. Nothing
-  else in the pipeline depends on last week's copy still being there.
-- **Persistent pipeline state** (currently `data/research/state/game_history.json`, written via
-  `scripts/research/state/store.py::JsonListStore`): must survive across runs, or the "don't repeat
+- **TRANSIENT** — `data/research/YYYY-MM-DD/` (`research_results.json`, `summary.md`) and
+  `logs/`: safe to discard after review; a new dated folder every run. Nothing else in the pipeline
+  depends on last run's copy still being there. Gitignored, as it always was.
+- **PERSISTENT** — `state/research/game_history.json`, written via
+  `scripts/research/state/store.py::JsonListStore`: must survive across runs, or the "don't repeat
   the same game every month" behavior in "Game history repetition" below silently stops working.
+  Since V0.3, this lives under the Git-tracked `state/` directory (`scripts/config.py::STATE_DIR`),
+  not under `data/` -- see "Git-backed persistent state" below for why.
+
+Both trees are derived from `scripts/config.py::BASE_DIR`, never a hard-coded absolute path, so the
+same code resolves correctly regardless of where the repository happens to be checked out (a
+developer's machine, or a GitHub Actions runner's `$GITHUB_WORKSPACE`) -- local and cloud execution
+share the exact same CLI and the exact same persistence abstraction, with no environment-specific
+branching in Python. The state directory is also independently configurable per invocation via
+`--state-dir` (and the output directory via `--output-dir`), so a caller never needs to hard-code
+either path.
 
 `JsonListStore` is deliberately minimal (load/save/append/extend over one JSON file of plain
 dicts) -- not a database. It exists so callers (currently only `game_history.py`) never read/write
@@ -115,29 +135,103 @@ behind -- for `game_history.json` specifically, that would mean every subsequent
 `atomic_write_text()` guarantees a reader always sees either the complete previous content or the
 complete new content, never a partial write; `persistence.py`'s transient output goes through the
 same helper for the same reason. This does **not** make concurrent writers safe together (a race
-between two writers is still a lost update, not corruption) -- nothing in this stage currently runs
-concurrently, so that is a documented limitation, not a bug fixed here.
+between two writers is still a lost update, not corruption) -- see "Concurrency" below for how the
+GitHub Actions workflow avoids that scenario without building any locking of its own.
 
-**This does not yet survive GitHub Actions.** GitHub Actions runners are ephemeral: every workflow
-run starts from a fresh checkout, so anything written to `data/` (currently entirely gitignored,
-per CLAUDE.md's "Repository structure") is gone by the next run. That means `game_history.json`
-would silently reset to empty on every scheduled run once GitHub Actions is introduced -- exactly
-the failure mode that made the repetition penalty worth building. Do not implement GitHub Actions
-around this without first closing that gap. Options for whoever implements the GitHub Actions
-stage (V0.3+), in rough order of $0-budget simplicity, to decide on then:
+## Git-backed persistent state
 
-1. **Commit the state file back to the repository** after each run (a bot commit touching only
-   `data/research/state/game_history.json`, which would need an explicit `.gitignore` exception for
-   that one path). Simplest, fully $0, but means the workflow needs write access back to the repo.
-2. **`actions/cache`** keyed on a stable key. Free and simple, but cache entries are not a durability
-   guarantee -- GitHub can and does evict them (size/age limits), so this is a "probably fine most of
-   the time" option, not a real persistence guarantee.
-3. **External store** (a private Gist, a small object-storage bucket, or a lightweight managed
-   database) if/when the state needs to be shared across more than one workflow or written from
-   somewhere other than the scheduled run.
+GitHub Actions runners are ephemeral: every workflow run starts from a fresh checkout, so anything
+written only to the runner's local disk is gone once the job ends. `state/` solves this by being an
+ordinary, Git-tracked part of the repository: the GitHub Actions workflow (see "GitHub Actions
+workflow" below) commits and pushes `state/` changes back to the repository at the end of a
+successful run, so the next run's checkout starts from the previous run's updated state.
 
-Whichever option is chosen still goes through the "API integrations" and "Human approval required"
-rules in CLAUDE.md if it introduces any paid service or new credential.
+**This is an intentional, simple MVP choice, not the final answer.** Git-backed state was chosen
+because it costs nothing extra (no new service, no new credential, fits the $0 Stage 1 budget in
+docs/BUSINESS_STRATEGY.md), needs no new dependency, and is trivially inspectable (`git log --
+state/` is a complete audit trail of every research run's effect on persistent state, for free).
+It is not designed to scale: every state-changing run adds a commit, and this is not meant to
+survive high write frequency, multiple concurrent writers, or non-JSON/large state.
+
+**This can be replaced later without changing Research Agent's business logic.** `game_history.py`
+and `ranking.py` only ever call `JsonListStore`'s `load()`/`save()`/`append()`/`extend()`; nothing
+in this stage's scoring, ranking, deduplication, or source-health logic depends on state being
+stored in Git specifically. A future version can reimplement `JsonListStore` against SQLite, a
+small managed database, or an external store (see the V0.2 doc history for other options that were
+considered) by changing that one class -- and, separately, removing the workflow's commit/push
+steps -- without touching any caller.
+
+Explicitly out of scope for "source of truth" here (per this task's own constraint, kept as a
+standing rule): GitHub Actions **cache** (`actions/cache`) and workflow **artifacts** are not
+used to store `game_history.json`. Both are convenience/diagnostic mechanisms with no durability
+guarantee (cache entries can be evicted; artifacts expire on a retention schedule -- see "Transient
+artifact vs persistent state" below) and neither is a place business logic should ever read
+authoritative state from.
+
+## Transient artifact vs persistent state
+
+Every workflow run also uploads `data/research/` (that run's `research_results.json` and
+`summary.md`) as a GitHub Actions artifact, named `research-agent-output-<run number>`, retained
+for 7 days. This exists purely for human inspection/debugging of a specific run (e.g. "what did the
+agent actually see and rank on run #42") -- it is never read back by any part of the pipeline, and
+it is not where persistent state lives (that is `state/research/`, committed to Git -- see above).
+Losing an old artifact to its retention period has no effect on the pipeline's behavior.
+
+## Concurrency
+
+Two Research Agent runs updating `state/` at the same time could conflict or corrupt the git-backed
+state (e.g. two workflow runs each trying to push a commit based on the same starting point). The
+simplest reasonable protection, and all that V0.3 adds, is a GitHub Actions
+[concurrency group](https://docs.github.com/actions/using-jobs/using-concurrency) on the workflow:
+
+```yaml
+concurrency:
+  group: research-agent-state
+  cancel-in-progress: false
+```
+
+This serializes `workflow_dispatch` runs of this specific workflow through GitHub's own queue --
+a second manual run started while one is in progress waits for the first to finish instead of
+running in parallel. This is not distributed locking and does not need to be: within GitHub
+Actions, it is a built-in, zero-code guarantee. It does **not** protect against a human running
+`python -m scripts.research_agent` locally and pushing `state/` changes at the same moment a
+workflow run is doing the same -- that remains a plain Git push race, handled the same way any
+conflicting push is (see the next paragraph), not by anything special to this stage.
+
+The workflow's push step never force-pushes. If the remote `state/` has moved since checkout (e.g.
+a conflicting local push happened in between), `git push` fails normally and the workflow reports
+that failure clearly (a `::error::` annotation and a non-zero exit) instead of overwriting
+conflicting remote state -- the fix is to re-run the workflow (or resolve manually), not to retry
+with `--force`.
+
+## GitHub Actions workflow
+
+`.github/workflows/research_agent.yml` -- manually triggered only (`workflow_dispatch`, no
+`schedule`/`cron`/`repository_dispatch`; see CLAUDE.md "Cloud execution and budget": scheduling is
+deliberately not added until the MVP is stable). Purpose: prove the agent runs end-to-end on a
+clean Linux runner, that real RSS network requests work there, and that persistent state survives
+across separate runs -- not to automate production yet.
+
+Steps, in order: checkout -> set up Python 3.11 -> install dependencies -> run the full automated
+test suite (a failure here stops the job before touching `state/`) -> run Research Agent against
+the real configured sources (`--output-dir data/research --state-dir state/research`, the same CLI
+a local developer would run) -> print the summary into the workflow's own job summary and flag a
+degraded or zero-candidate run with `::warning::`/`::error::` annotations -> upload `data/research/`
+as a short-retention artifact -> detect whether `state/` changed -> if so, verify the change is
+JSON-only, commit it with the recognizable message `chore(state): update research state`, and push.
+No commit is created when `state/` did not change.
+
+Commit safety: the workflow only ever runs `git add state/` (never `git add -A`/`git add .`), so
+the automated commit cannot contain source code, workflow files, secrets, `.env`, logs, transient
+`data/`, or any other working-tree change -- by construction, not by convention. It additionally
+refuses to commit if anything under `state/` is not a `.json` file, as defense in depth.
+
+Permissions: `permissions: contents: write` at the workflow level -- the minimum needed to push the
+state commit, and nothing else (no issues/PR/package scopes). The GitHub Actions runner's own
+network stack is used unmodified for RSS requests: no TLS bypass, no disabled certificate
+verification (see "Sources" above and CLAUDE.md's security posture) -- the runner is the real
+network-compatibility test this stage needed, which the previous development environment's
+intercepting TLS proxy could not provide.
 
 ## Game history repetition
 
@@ -302,7 +396,8 @@ No other module needs to change.
 
 ## Output
 
-Transient, under `data/research/YYYY-MM-DD/` (see "Persistent state vs transient output" above):
+TRANSIENT, under `data/research/YYYY-MM-DD/` (gitignored; see "Persistent state vs transient
+output" above):
 
 - `research_results.json` — the full `ResearchResult`, reloadable via
   `persistence.load_research_results()`.
@@ -311,13 +406,14 @@ Transient, under `data/research/YYYY-MM-DD/` (see "Persistent state vs transient
   repetition penalty (if any), evidence sources, and score-grounded reasoning; plus a source-health
   section and a degraded-run warning banner when applicable.
 
-Persistent, under `data/research/state/` (not dated — accumulates across runs, and is the part
-that needs a durability story before GitHub Actions -- see above): `game_history.json`.
+PERSISTENT, under `state/research/` (Git-tracked; not dated — accumulates across runs; see
+"Git-backed persistent state" above): `game_history.json`.
 
-## Possible V0.3 directions (not implemented)
+Also transient: `logs/` (runtime log files) — never uploaded as a workflow artifact, never
+committed, and not expected to survive past the run that produced them.
 
-- Close the GitHub Actions persistence gap identified above before introducing scheduled runs (see
-  "Persistent state vs transient output").
+## Possible V0.4 directions (not implemented)
+
 - Extend the same persistent-state approach to "previously selected topics" generally (not just
   games), if repeat non-game topics turn out to be a real problem in practice.
 - Fact-check hooks: a place for the future Fact Checking stage to attach verified claims to a
@@ -326,5 +422,10 @@ that needs a durability story before GitHub Actions -- see above): `game_history
   identified, via the existing `known_scores` hook — no data model change needed.
 - Consider letting `dedup.py` corroboration counts feed into `novelty`/`audience_interest` as well
   as `confidence`, if that turns out to correlate with anything once real performance data exists.
+- Scheduling (cron) for the GitHub Actions workflow, once the manually triggered run has been
+  exercised enough to trust it unattended — deliberately not part of V0.3 (see CLAUDE.md "Cloud
+  execution and budget").
+- Revisit Git-backed state (see "Git-backed persistent state" above) if commit volume, state size,
+  or the need for concurrent writers ever makes it impractical.
 
-Deciding and implementing V0.3 is a separate, explicitly scoped task.
+Deciding and implementing V0.4 is a separate, explicitly scoped task.

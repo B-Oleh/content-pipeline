@@ -1,0 +1,151 @@
+# Manually triggered Research Agent run (V0.3 -- "Cloud Execution and
+# Persistent State"). See docs/RESEARCH_AGENT.md "GitHub Actions workflow"
+# for the full design and docs/RESEARCH_AGENT.md "Git-backed persistent
+# state" for why this workflow commits to state/.
+#
+# workflow_dispatch ONLY -- deliberately no schedule/cron/repository_dispatch
+# yet (see CLAUDE.md "Cloud execution and budget": "Do not add scheduling or
+# large-scale automation until the MVP is stable"). This proves the pipeline
+# runs end-to-end on a real GitHub Actions runner; it does not automate it.
+name: Research Agent (manual)
+
+on:
+  workflow_dispatch: {}
+
+# Minimum permissions this workflow needs: read the repo, and write back to
+# it only to commit state/ changes. No other scopes (issues, PRs, packages,
+# etc.) are requested.
+permissions:
+  contents: write
+
+# The simplest reasonable protection against two Research Agent runs racing
+# to update state/ at the same time (see docs/RESEARCH_AGENT.md
+# "Concurrency"): serialize workflow_dispatch runs of this workflow through
+# GitHub's own concurrency queue instead of building any locking of our own.
+# A second manual run started while one is in progress QUEUES rather than
+# running in parallel or cancelling the first.
+concurrency:
+  group: research-agent-state
+  cancel-in-progress: false
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run automated test suite
+        run: pytest
+
+      - name: Run Research Agent (real configured RSS sources)
+        id: research_agent
+        run: |
+          set -o pipefail
+          python -m scripts.research_agent \
+            --output-dir data/research \
+            --state-dir state/research \
+            | tee agent_run.log
+
+          RESULTS_PATH=$(grep '^Results:' agent_run.log | sed 's/^Results: //')
+          SUMMARY_PATH=$(grep '^Summary:' agent_run.log | sed 's/^Summary: //')
+          echo "results_path=$RESULTS_PATH" >> "$GITHUB_OUTPUT"
+          echo "summary_path=$SUMMARY_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Report research health in workflow logs
+        if: always() && steps.research_agent.outputs.summary_path != ''
+        run: |
+          SUMMARY_PATH="${{ steps.research_agent.outputs.summary_path }}"
+          RESULTS_PATH="${{ steps.research_agent.outputs.results_path }}"
+
+          echo "----- Research Agent summary -----"
+          cat "$SUMMARY_PATH"
+          {
+            echo "## Research Agent summary"
+            echo '```'
+            cat "$SUMMARY_PATH"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          RAW_COUNT=$(python -c "import json; print(json.load(open('$RESULTS_PATH'))['raw_candidate_count'])")
+          echo "Raw candidates collected across all sources: $RAW_COUNT"
+          if [ "$RAW_COUNT" -eq 0 ]; then
+            echo "::error::No usable research data was collected from any source in this run -- see the summary above and the uploaded artifact."
+          elif grep -q "WARNING: research quality is degraded" "$SUMMARY_PATH"; then
+            echo "::warning::Research quality is degraded in this run (too many sources failed) -- see the summary above."
+          fi
+
+      - name: Upload transient research output as an artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: research-agent-output-${{ github.run_number }}
+          path: data/research/
+          # Diagnostic/inspection only -- never the source of truth for
+          # persistent state (see docs/RESEARCH_AGENT.md "Transient artifact
+          # vs persistent state"). Kept short since this is throwaway output.
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Detect changes under state/
+        id: state_diff
+        run: |
+          if [ -n "$(git status --porcelain -- state/)" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate that state changes are JSON-only
+        if: steps.state_diff.outputs.changed == 'true'
+        run: |
+          # Defense in depth for "Automated state commits must never include
+          # application source code, workflow files, secrets, .env, logs,
+          # transient data/, or generated media" -- since we only ever
+          # `git add state/` below, this can only ever be about files under
+          # state/, but this makes the guarantee explicit and would refuse a
+          # run that somehow wrote an unexpected file type under state/.
+          UNEXPECTED=$(git status --porcelain -- state/ | grep -v '\.json$' || true)
+          if [ -n "$UNEXPECTED" ]; then
+            echo "::error::Unexpected non-JSON change(s) detected under state/ -- refusing to commit:"
+            echo "$UNEXPECTED"
+            exit 1
+          fi
+
+      - name: Commit state changes
+        if: steps.state_diff.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Stage ONLY state/ -- never `git add -A` / `git add .` -- so this
+          # commit cannot contain source code, workflow files, secrets,
+          # .env, logs, or transient data/, regardless of what else may have
+          # changed in the working tree during this run.
+          git add state/
+          git commit -m "chore(state): update research state"
+
+      - name: Push state changes
+        if: steps.state_diff.outputs.changed == 'true'
+        run: |
+          # No --force: if the remote moved since checkout (e.g. a concurrent
+          # manual push), this fails loudly instead of silently overwriting
+          # conflicting remote state (see docs/RESEARCH_AGENT.md
+          # "Concurrency"). Re-running the workflow after the conflict is
+          # resolved is the expected recovery path.
+          if ! git push origin "HEAD:${{ github.ref_name }}"; then
+            echo "::error::Failed to push updated research state to ${{ github.ref_name }} -- the remote branch likely moved since checkout. Pull the latest changes and re-run this workflow rather than force-pushing."
+            exit 1
+          fi
+
+      - name: No state changes to commit
+        if: steps.state_diff.outputs.changed == 'false'
+        run: echo "state/ is unchanged this run -- nothing to commit."

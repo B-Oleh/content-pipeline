@@ -19,9 +19,15 @@ logs/*
 !logs/.gitkeep
 *.log
 
-# Structured pipeline data (generated at runtime)
+# Structured pipeline data (transient per-run output, generated at runtime)
 data/*
 !data/.gitkeep
+
+# state/ is intentionally NOT git-ignored. It holds persistent pipeline
+# state (e.g. state/research/game_history.json) that must survive across
+# separate GitHub Actions runs on ephemeral runners -- for the $0 MVP, Git
+# itself is the durability mechanism (see docs/RESEARCH_AGENT.md "Git-backed
+# persistent state"). Do not add a state/* ignore rule here.
 
 # Production assets (downloaded/generated media)
 assets/*

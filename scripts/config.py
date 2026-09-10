@@ -18,7 +18,17 @@ OUTPUT_DIR = BASE_DIR / "output"
 DATA_DIR = BASE_DIR / "data"
 LOGS_DIR = BASE_DIR / "logs"
 
+# Persistent pipeline state (e.g. game recommendation history) that must
+# survive across separate runs/workflow executions -- unlike ASSETS_DIR,
+# OUTPUT_DIR, DATA_DIR, and LOGS_DIR above, this directory is intentionally
+# NOT git-ignored (see docs/RESEARCH_AGENT.md "Git-backed persistent state").
+# Individual stages resolve their own subdirectory under this (e.g.
+# scripts/research/cli.py uses STATE_DIR / "research"); relative to BASE_DIR
+# like every other directory here, so it never hard-codes an absolute path
+# and behaves identically locally and in CI.
+STATE_DIR = BASE_DIR / "state"
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
-for _directory in (ASSETS_DIR, OUTPUT_DIR, DATA_DIR, LOGS_DIR):
+for _directory in (ASSETS_DIR, OUTPUT_DIR, DATA_DIR, LOGS_DIR, STATE_DIR):
     _directory.mkdir(parents=True, exist_ok=True)

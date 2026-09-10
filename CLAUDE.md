@@ -50,6 +50,11 @@ do not duplicate that tree here; keep only what Claude needs architecturally:
 - Pipeline automation code lives under `/scripts`; tests under `/tests`.
 - `/assets`, `/output`, `/data`, and `/logs` hold generated/runtime artifacts, not source, and are
   git-ignored.
+- `/state` holds persistent pipeline state (e.g. game recommendation history) that must survive
+  across separate runs/workflow executions. Unlike the directories above, it is intentionally
+  tracked in Git — do not add it to `.gitignore` — as the simplest $0 MVP durability mechanism
+  (see docs/RESEARCH_AGENT.md "Git-backed persistent state" for why, and how it can later be
+  replaced without changing pipeline business logic).
 - `/docs` holds supporting documentation, including the business strategy.
 
 Preserve this structure unless there is a good reason to change it. Do not make large architectural
@@ -86,19 +91,29 @@ follows the "API integrations" approval rule below regardless of which concern i
 
 The single place for cloud/CI rules — do not restate these elsewhere.
 
-- GitHub Actions is the planned initial cloud execution environment for running the pipeline; it
-  is not yet implemented.
+- GitHub Actions is the cloud execution environment for running the pipeline. A manually
+  triggered (`workflow_dispatch` only) workflow exists for Research Agent
+  (`.github/workflows/research_agent.yml`; see docs/RESEARCH_AGENT.md "GitHub Actions workflow")
+  to prove the agent runs end-to-end on a real runner and that persistent state survives across
+  runs. No other pipeline stage has a workflow yet.
 - The system must run within a strict $0 operating budget while in Stage 1 of the business
   strategy (see [`docs/BUSINESS_STRATEGY.md`](docs/BUSINESS_STRATEGY.md)).
 - Any credential a GitHub Actions workflow needs is stored in GitHub Secrets, never committed
-  (see "Environment variables and secret handling").
+  (see "Environment variables and secret handling"). The Research Agent workflow currently needs
+  none.
 - No paid service may be enabled in CI or anywhere else without explicit user approval (see "API
   integrations") — the $0 budget is the default, not a target to negotiate down from.
 - Do not add scheduling or large-scale automation until the MVP is stable (see "Current
-  development stage").
+  development stage") — the existing Research Agent workflow is deliberately `workflow_dispatch`
+  only; do not add `schedule`/`cron`/`repository_dispatch` triggers to it or any other workflow
+  without this restriction being revisited first.
 - Favor event-driven integration (e.g. webhooks/callbacks) over polling loops for external
   services such as Telegram, especially from scheduled CI jobs, to avoid wasting execution
   minutes and to keep behavior responsive.
+- Persistent pipeline state committed from a workflow (see `/state` above) must only ever be
+  staged explicitly (e.g. `git add state/`) — never a blanket `git add -A`/`git add .` — so an
+  automated commit can never include source code, workflow files, secrets, or other unrelated
+  working-tree changes.
 
 ## Pipeline stages
 

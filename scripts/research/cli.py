@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from scripts.config import BASE_DIR, DATA_DIR
+from scripts.config import BASE_DIR, DATA_DIR, STATE_DIR
 from scripts.research.dedup import deduplicate_candidates
 from scripts.research.game_history import load_game_history, record_game_recommendations
 from scripts.research.models import ContentPillar, ContentRole, ResearchCandidate, ResearchResult, SourceHealth
@@ -33,13 +33,16 @@ logger = get_logger(__name__)
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "sources.json"
 # Transient per-run output (see docs/RESEARCH_AGENT.md "Persistent state vs
-# transient output"): a new dated subfolder every run, safe to discard.
+# transient output"): a new dated subfolder every run under the gitignored
+# data/ directory, safe to discard -- never committed.
 DEFAULT_OUTPUT_BASE_DIR = DATA_DIR / "research"
 # Persistent pipeline state that must survive across runs (currently just
-# game_history.json). Physically still under the gitignored data/ directory
-# for local/V0.2 use -- see docs/RESEARCH_AGENT.md for how this needs to
-# change once GitHub Actions runners are introduced.
-DEFAULT_STATE_DIR = DATA_DIR / "research" / "state"
+# game_history.json). Since V0.3, this lives under the tracked (NOT
+# gitignored) state/ directory rather than under data/, specifically so it
+# survives across separate GitHub Actions runs on ephemeral runners -- see
+# docs/RESEARCH_AGENT.md "Git-backed persistent state" for why Git is used
+# as the $0 MVP durability mechanism and how this could later be replaced.
+DEFAULT_STATE_DIR = STATE_DIR / "research"
 
 
 def _build_fixture_source(entry: dict) -> ResearchSource:
@@ -178,7 +181,7 @@ def main(argv: list[str] | None = None) -> None:
         "--state-dir",
         type=Path,
         default=DEFAULT_STATE_DIR,
-        help="Directory for persistent pipeline state, e.g. game history (default: data/research/state)",
+        help="Directory for persistent pipeline state, e.g. game history (default: state/research)",
     )
     args = parser.parse_args(argv)
 
