@@ -23,12 +23,17 @@ from pathlib import Path
 
 import pytest
 
-from scripts.production.asset_acquisition import _dedupe_candidates, acquire_assets
+from scripts.production.asset_acquisition import MAX_CONSECUTIVE_INFO_CARDS, _dedupe_candidates, acquire_assets
 from scripts.production.visual_relevance import ScoredCandidate
-from scripts.production.models import Scene
+from scripts.production.models import (
+    PRODUCTION_MODE_HYBRID_VISUAL,
+    PRODUCTION_MODE_INFO_CARD,
+    PRODUCTION_MODE_REAL_VISUAL,
+    Scene,
+)
 from scripts.production.providers.llm import LlmProvider, VisionEvaluationError
 from scripts.production.providers.visual import AssetResult, VisualAssetProvider
-from scripts.production.vision_validation import SHORTLIST_SIZE
+from scripts.production.vision_validation import EXACT_MATCH_SCORE, RESCUE_MIN_SCORE, SHORTLIST_SIZE, VISION_RELEVANCE_THRESHOLD
 
 pytestmark = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
@@ -444,6 +449,107 @@ def test_vision_cache_prevents_reevaluating_the_same_thumbnail_across_scenes(tmp
     assert scene_a.asset_source == "pexels"
     assert scene_b.asset_source == "pexels"
     assert len(llm.vision_calls) == 1  # scene_b's identical candidate reused scene_a's cached evaluation
+
+
+# ---------------------------------------------------------------------------
+# Part 1/4/5/7: production modes, hybrid_visual, and the consecutive-info-
+# card density rule.
+# ---------------------------------------------------------------------------
+
+
+def test_strong_match_is_recorded_as_real_visual(tmp_path, monkeypatch):
+    _patch_thumbnail_fetch(monkeypatch)
+    scene = _scene(0, "A desktop GPU inside a PC case", ["desktop gpu inside pc case"])
+    pexels = _FakeProvider("pexels", {"desktop gpu inside pc case": [_asset("pexels", "https://pexels.com/video/desktop-gpu-inside-pc-case-1")]})
+    llm = _FakeLlmProvider([_approve(score=EXACT_MATCH_SCORE)])
+
+    acquire_assets([scene], [pexels], tmp_path, llm)
+
+    assert scene.production_mode == PRODUCTION_MODE_REAL_VISUAL
+    assert scene.asset_source == "pexels"
+
+
+def test_info_card_fallback_is_recorded_as_info_card_mode(tmp_path, monkeypatch):
+    _patch_thumbnail_fetch(monkeypatch)
+    scene = _scene(0, "A very specific named product review", ["specific named product review"])
+    pexels = _FakeProvider("pexels", {"specific named product review": [_asset("pexels", "https://pexels.com/video/random-unrelated-topic-1")]})
+    llm = _FakeLlmProvider([_reject("not PC/gaming related")])
+
+    acquire_assets([scene], [pexels], tmp_path, llm)
+
+    assert scene.production_mode == PRODUCTION_MODE_INFO_CARD
+
+
+def test_honest_but_not_exact_match_becomes_hybrid_visual(tmp_path, monkeypatch):
+    """An approved candidate scoring between VISION_RELEVANCE_THRESHOLD and
+    EXACT_MATCH_SCORE is genuinely relevant but not a strong/exact match --
+    it must be rendered as a hybrid scene (real footage + overlay card),
+    not shown full-screen as if it were exact."""
+    _patch_thumbnail_fetch(monkeypatch)
+    assert VISION_RELEVANCE_THRESHOLD < 75 < EXACT_MATCH_SCORE
+    scene = _scene(0, "A gaming desk setup with RGB lighting", ["gaming desk setup"])
+    pexels = _FakeProvider("pexels", {"gaming desk setup": [_asset("pexels", "https://pexels.com/video/gaming-desk-setup-1")]})
+    llm = _FakeLlmProvider([_approve(score=75, reason="a genuinely relevant gaming desk setup, not an exact match")])
+
+    acquire_assets([scene], [pexels], tmp_path, llm)
+
+    assert scene.production_mode == PRODUCTION_MODE_HYBRID_VISUAL
+    assert scene.asset_source == "pexels"
+    assert scene.asset_path is not None and scene.asset_path.exists()
+    # The rendered hybrid scene replaces the raw download at the final
+    # scene asset path -- the intermediate source download must not linger.
+    assets_dir = tmp_path / "assets"
+    remaining = sorted(p.name for p in assets_dir.iterdir())
+    assert remaining == ["scene_00.mp4"]
+
+
+def test_info_card_is_not_selected_when_an_honest_hybrid_candidate_exists(tmp_path, monkeypatch):
+    """Part 7's explicit requirement: info_card must not be chosen if a
+    valid real or hybrid candidate exists."""
+    _patch_thumbnail_fetch(monkeypatch)
+    scene = _scene(0, "A gaming desk setup with RGB lighting", ["gaming desk setup"])
+    pexels = _FakeProvider("pexels", {"gaming desk setup": [_asset("pexels", "https://pexels.com/video/gaming-desk-setup-1")]})
+    llm = _FakeLlmProvider([_approve(score=75)])
+
+    acquire_assets([scene], [pexels], tmp_path, llm)
+
+    assert scene.production_mode != PRODUCTION_MODE_INFO_CARD
+    assert scene.asset_source != "info_card"
+
+
+def test_density_rule_rescues_a_near_miss_after_max_consecutive_info_cards(tmp_path, monkeypatch):
+    """Part 5's density rule: once MAX_CONSECUTIVE_INFO_CARDS scenes in a
+    row have fallen back to a text card, the next scene prefers an honest
+    "near miss" (in-domain, not misleading, but below the approval
+    threshold) as a hybrid_visual scene over yet another info card."""
+    _patch_thumbnail_fetch(monkeypatch)
+    assert RESCUE_MIN_SCORE <= 60 < VISION_RELEVANCE_THRESHOLD
+    scene_a = _scene(0, "Some narration with no visual hits at all", ["a query with no hits at all a"])
+    scene_b = _scene(1, "Another narration with no visual hits at all", ["a query with no hits at all b"])
+    scene_c = _scene(2, "A gaming desk setup nearby", ["gaming desk setup nearby"])
+    pexels = _FakeProvider("pexels", {"gaming desk setup nearby": [_asset("pexels", "https://pexels.com/video/near-miss-1")]})
+    llm = _FakeLlmProvider([_reject("in-domain but not a strong match", computer_domain=True, score=60, misleading=False)])
+
+    acquire_assets([scene_a, scene_b, scene_c], [pexels], tmp_path, llm)
+
+    assert scene_a.production_mode == PRODUCTION_MODE_INFO_CARD
+    assert scene_b.production_mode == PRODUCTION_MODE_INFO_CARD
+    assert scene_c.production_mode == PRODUCTION_MODE_HYBRID_VISUAL
+    assert scene_c.asset_source == "pexels"
+
+
+def test_near_miss_is_not_rescued_before_the_consecutive_info_card_limit(tmp_path, monkeypatch):
+    """A near-miss candidate is only spent to break up a run of info cards
+    -- with no prior info_card streak, the same near-miss must still fall
+    back to an info card rather than being used prematurely."""
+    _patch_thumbnail_fetch(monkeypatch)
+    scene = _scene(0, "A gaming desk setup nearby", ["gaming desk setup nearby"])
+    pexels = _FakeProvider("pexels", {"gaming desk setup nearby": [_asset("pexels", "https://pexels.com/video/near-miss-1")]})
+    llm = _FakeLlmProvider([_reject("in-domain but not a strong match", computer_domain=True, score=60, misleading=False)])
+
+    acquire_assets([scene], [pexels], tmp_path, llm)
+
+    assert scene.production_mode == PRODUCTION_MODE_INFO_CARD
 
 
 def test_among_multiple_passing_candidates_the_highest_vision_score_is_selected(tmp_path, monkeypatch):

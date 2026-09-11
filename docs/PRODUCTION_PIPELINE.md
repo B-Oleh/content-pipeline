@@ -39,17 +39,24 @@ scripts/production/
                                         on research/rendering; also its own CLI (python -m
                                         scripts.production.preflight) for a separate workflow step
   topic_selection.py                   Picks one Research Agent candidate, preferring pillars that
-                                        are reliably illustrated with generic stock footage
+                                        are reliably illustrated with generic stock footage, with
+                                        visual producibility as a same-tier tie-breaker
   script_agent.py                      Gemini call + the fabrication-claim guard (see below)
+  scene_intent.py                      Deterministic (no Gemini call) scene-intent classification +
+                                        generic query expansion, on top of Script Agent's own queries
   asset_acquisition.py                 Per-scene multi-candidate Pexels/Pixabay search, metadata
-                                        shortlist, Gemini Vision validation, info-card fallback
+                                        shortlist, Gemini Vision validation, production-mode
+                                        selection (real_visual/hybrid_visual/info_card), density rule
                                         (see "Visuals" below)
   visual_relevance.py                  Deterministic metadata-only relevance PRE-FILTER + shot-type
                                         classification -- builds the shortlist, does not decide
   vision_validation.py                 Gemini Vision: the actual accept/reject relevance decision
-                                        over each scene's metadata shortlist (see "Visuals" below)
-  info_card.py                         Renders a designed text/graphic "information card" clip when
-                                        no honestly-matching stock asset exists
+                                        over each scene's metadata shortlist, plus cached-evaluation
+                                        lookup and near-miss "rescue" for the density rule (see
+                                        "Visuals" below)
+  info_card.py                         Renders a designed, motion-enhanced "information card" clip
+                                        (no real footage) or a "hybrid scene" (real footage + a small
+                                        honest overlay card)
   voice_generation.py                  Per-scene edge-tts narration; scene duration = its own audio
   subtitles.py                         Groups word timings into short caption chunks; writes .ass
   video_assembly.py                    ffmpeg: scale/crop to 1080x1920, concat scenes, burn subtitles
@@ -135,6 +142,19 @@ real run:
 If no candidate falls in a reliable pillar, the single best-ranked candidate is used anyway (with a
 logged warning) rather than failing the run -- CLAUDE.md priorities (see "Priorities") were not
 asked to be relaxed, but a hard stop here would defeat the milestone's purpose of proving delivery.
+
+**Visual producibility (secondary tie-breaker).** `estimate_visual_producibility()` scores a
+candidate 0.0-0.5 by how much concrete, easily-stock-photographed PC/gaming vocabulary
+(`gpu`, `monitor`, `setup`, `keyboard`, ...) its title/summary already contains, and `sort_key()`
+uses it as a secondary factor -- after `PILLAR_VISUAL_RELIABILITY`, before `overall_score` -- so it
+never overrides the pillar tier (a `monthly_games` candidate is still tier 0 no matter how much
+hardware vocabulary it contains, since it still needs a *specific game's* footage a stock library
+won't have). This only breaks ties **within** the same pillar tier: given two similarly-ranked
+candidates in the same tier, the one more likely to actually find honest stock footage for its own
+scenes is preferred, which is the real, observed failure this addresses -- too many produced videos
+ended up mostly text-only cards because the chosen topic was too abstract to illustrate. This does
+**not** change the business niche; every candidate already comes from the same PC-gaming/hardware
+research pipeline (see `tests/production/test_topic_selection.py`).
 
 `select_topic_candidate()` also takes an optional `preferred_title` -- set from the `TOPIC_OVERRIDE`
 environment variable, in turn set by produce_video.yml's `topic_override` workflow_dispatch input
@@ -276,9 +296,24 @@ documented, free-tier APIs (video search first, photo search as fallback) -- no 
 "desktop gpu inside pc case", "pc game performance settings menu" -- rather than vague single-word
 queries like "gaming" or "computer" that match almost anything. The prompt also asks for shot-type
 variety within a scene's own query list (close-up / hardware-detail / monitor-UI / person-use-case)
-and across scenes, and forbids naming a specific game/product/model in any query, since stock
+and across scenes, forbids naming a specific game/product/model in any query, since stock
 libraries will not have that exact footage (`SCRIPT_JSON_SCHEMA` enforces 3-5 items server-side on
-top of the prompt instruction).
+top of the prompt instruction), and asks Script Agent to keep every scene visually concrete --
+an overly abstract idea is reshaped into a shorter, more illustrable scene (never inventing a new
+fact) rather than left as one long unpicturable sentence.
+
+**Scene-intent query expansion (deterministic, no extra Gemini call).** `scene_intent.py` buckets
+each scene into one of seven recurring shot intents for this niche (`hardware_detail`, `pc_setup`,
+`monitor_ui`, `person_use_case`, `shopping_buying`, `optimization_settings`, `abstract_tech`) using
+only text already on the `Scene` (narration, on-screen text, Script Agent's own queries --
+`classify_scene_intent()`), then `expand_queries_for_intent()` appends a few generic, honest,
+provider-friendly phrases for that intent ON TOP OF (never replacing) Script Agent's own queries,
+capped at `MAX_QUERIES_PER_SCENE` (8). `asset_acquisition.py::_collect_candidates()` searches
+`effective_queries_for_scene()`'s combined list instead of Script Agent's raw queries alone -- a
+bigger, more targeted pool per scene means a better chance a real, honest match is found before
+Vision is ever asked to fall back to an info card. This is free (pure keyword-overlap
+classification, like `visual_relevance.py::classify_shot_type()`) and deliberately never invents a
+new query family Script Agent didn't already suggest a version of.
 
 **Multi-candidate collection and metadata pre-filter.** `asset_acquisition.py` no longer stops at
 the first search hit. For each scene it queries every one of its `visual_search_queries` against
@@ -336,9 +371,24 @@ rules" both rule out. In practice this cache mostly catches the rarer case of tw
 candidates sharing one CDN thumbnail URL; the far more common overlapping-query duplicate is already
 removed earlier, for free, by `_dedupe_candidates()` above.
 
-**Fallback: information card, with NO rejected asset in it.** If every shortlisted candidate is
-rejected (or none was found at all), `asset_acquisition.py` renders a designed **information card**
-(`info_card.py::render_info_card()`) with a plain flat designed background -- instead of using
+**Scene production modes.** Every scene ends up in one of three modes, recorded in
+`Scene.production_mode` (persisted through `to_dict()`, so a run's visual mix can be audited from
+`script.json` alone) -- preferred in this order:
+
+| Mode | When | What is shown |
+|---|---|---|
+| `real_visual` | An approved candidate's Vision `scene_relevance_score >= EXACT_MATCH_SCORE` (85) -- a strong, near-exact match | The real photo/video, full-screen, as-is |
+| `hybrid_visual` | An approved candidate scored between `VISION_RELEVANCE_THRESHOLD` (70) and `EXACT_MATCH_SCORE` (85) -- honest and on-topic but not exact; or a "rescued" near-miss (see density rule below) | The real photo/video as a background, dimmed only lightly, with a small top-anchored overlay card (`info_card.py::render_hybrid_scene()`) |
+| `info_card` | No candidate passed Vision at all, and no rescue applied | A fully designed text card (`info_card.py::render_info_card()`) -- no real footage |
+
+`vision_validation.py::get_cached_evaluation()` reads the *exact* score behind an already-approved
+candidate straight out of the same `vision_cache` used above -- at zero extra Vision cost -- so
+`asset_acquisition.py` can pick `real_visual` vs. `hybrid_visual` for a candidate
+`select_vision_validated_candidate()` already approved.
+
+**Fallback: information card, with NO rejected asset in it.** If nothing is approved (or rescued),
+`asset_acquisition.py` renders a designed **information card**
+(`info_card.py::render_info_card()`) with a designed gradient/glow background -- instead of using
 misleading generic footage -- honoring the task's explicit "never imply generic stock footage is
 footage of a specific named game, GPU, laptop, or product" rule, and its explicit "do not use the
 best bad candidate" instruction. A rejected candidate is **never downloaded and never appears
@@ -346,10 +396,45 @@ anywhere in the rendered video** -- not as scene footage, not as a photo, and no
 information-card background (darkened/blurred or otherwise): a grocery-store shelf rejected for a
 PC-hardware-discount scene must never appear in that scene in any form, so `_use_info_card()` does
 not attempt any backdrop download at all. The card shows a short headline (the scene's
-`on_screen_text`, or the first sentence of its narration) and, when available, a supporting fact
-line, with a subtle zoom/pan over its flat background. Scenes filled this way are marked
-`asset_source = "info_card"` so it is possible to audit, from `script.json` alone, how many scenes
-in a given video used a real Vision-approved asset vs. a generated card.
+`on_screen_text`, or the first sentence of its narration) and, when available, one short supporting
+fact line -- `BODY_MAX_LINES` (2) and `FACT_MAX_CHARS` (90) deliberately keep this to "headline plus
+one short statement," never paragraph-style text. Scenes filled this way are marked
+`asset_source = "info_card"` / `production_mode = "info_card"` so it is possible to audit, from
+`script.json` alone, how many scenes in a given video used a real asset vs. a generated card.
+
+**Designed, motion-enhanced info cards.** `info_card.py` renders over a layered dark gradient with
+two soft blurred glow accents (`_render_gradient_background()`) instead of one flat solid color --
+which reads as an unfinished placeholder -- with a rounded semi-transparent text panel for
+legibility. Text gets a deterministic, lightweight motion: a fixed fade-in plus a small upward slide
+(`TEXT_FADE_IN_SECONDS`/`TEXT_SLIDE_UP_PX`, via ffmpeg's `fade` filter and a time-varying `overlay`
+y-expression), and a flat/photo backdrop gets a slow continuous `zoompan` zoom (a video backdrop
+already has its own motion). **Important ffmpeg ordering gotcha:** `zoompan` must be applied to the
+plain background stream ONLY, strictly *before* the text overlay is composited on top -- `zoompan`
+samples its input as a single still image it progressively zooms into across `d` frames, so feeding
+it an already-animating (fading/sliding) stream freezes it on that stream's first, pre-fade frame
+for the whole duration, silently discarding the text animation. This was caught by manually
+rendering a real MP4 and inspecting extracted frames, not by the automated test suite (which only
+checks ffmpeg's exit code and output resolution, not pixel content) -- see the inline comment in
+`info_card.py::_composite_card()`.
+
+**Hybrid scenes (`render_hybrid_scene()`).** Shares the same Pillow text-layout engine and ffmpeg
+compositing pipeline as `render_info_card()`, but the background is a REQUIRED real, already
+Vision-approved photo/video (only lightly dimmed, so the footage stays visually dominant) with a
+smaller, top-anchored overlay card (`HYBRID_OVERLAY_PROFILE`: shorter, top-anchored, smaller font
+range than the full card's centered `FULL_CARD_PROFILE`) -- e.g. real gaming-desk-setup footage with
+a small "MYTH 2" / "You need a flagship GPU" overlay, instead of a full-screen text block. Used
+whenever the best available visual is honest and on-topic but not a strong/exact match on its own.
+
+**Visual-density rule (breaking up runs of info cards).** `asset_acquisition.py` tracks a
+`consecutive_info_cards` counter across the scene loop. Once it reaches
+`MAX_CONSECUTIVE_INFO_CARDS` (2), the next otherwise-info_card scene instead checks
+`vision_validation.find_rescue_candidate()` -- which scans the SAME already-cached Vision
+evaluations (no extra Vision calls) for the best "near miss": genuinely in-domain, not misleading,
+but scored below `VISION_RELEVANCE_THRESHOLD` yet at or above `RESCUE_MIN_SCORE` (55). If one
+exists, it is rendered as a `hybrid_visual` scene instead of another text card, and the counter
+resets; a misleading or out-of-domain candidate is never eligible for rescue at any score. This
+keeps a produced video from ever becoming an unbroken run of text-only cards, per the task's "you
+need watchable and intentional, not perfect cinematic quality" framing.
 
 A still photo (a genuinely Vision-approved one) gets a mild continuous zoom (`zoompan` in
 `video_assembly.py` / `info_card.py`) so no scene sits completely static.

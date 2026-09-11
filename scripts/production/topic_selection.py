@@ -8,9 +8,10 @@ research itself.
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
-from scripts.research.models import ContentPillar, ResearchResult, ScoredCandidate
+from scripts.research.models import ContentPillar, ResearchCandidate, ResearchResult, ScoredCandidate
 from scripts.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -19,7 +20,9 @@ logger = get_logger(__name__)
 # game_recommendations/monthly_games need a *specific* game's footage, which
 # stock libraries will not have -- see docs/PRODUCTION_PIPELINE.md "Topic
 # selection" for the reasoning (avoid pretending generic footage shows a
-# specific named product/game).
+# specific named product/game). This is the PRIMARY, dominant signal in
+# sort_key() below; estimate_visual_producibility() is a secondary,
+# same-tier tie-breaker only -- see its own docstring.
 PILLAR_VISUAL_RELIABILITY: dict[ContentPillar, int] = {
     ContentPillar.OPTIMIZATION: 3,
     ContentPillar.MISTAKES_AND_MYTHS: 3,
@@ -30,9 +33,49 @@ PILLAR_VISUAL_RELIABILITY: dict[ContentPillar, int] = {
     ContentPillar.MONTHLY_GAMES: 0,
 }
 
+# Concrete, easily-stock-photographed PC/gaming hardware vocabulary. A
+# candidate whose title/summary mentions several of these is a real signal
+# that scenes about it will find genuine, honest visual matches (a GPU
+# close-up, a gaming desk, a monitor) -- see estimate_visual_producibility().
+# This does not change the business niche (every candidate is already
+# PC-gaming/hardware content); it only distinguishes concrete, illustrable
+# topics from abstract ones within that niche.
+_EASY_TO_ILLUSTRATE_KEYWORDS = {
+    "gpu", "cpu", "graphics", "card", "processor", "monitor", "monitors", "laptop", "laptops",
+    "desktop", "keyboard", "keyboards", "mouse", "headset", "headsets", "ram", "memory",
+    "ssd", "storage", "cooler", "cooling", "case", "cases", "motherboard", "setup", "build",
+    "hardware", "pc", "computer", "computers", "gaming", "rig", "peripheral", "peripherals",
+    "webcam", "microphone", "upgrade", "upgrading",
+}
+_MAX_PRODUCIBILITY_KEYWORD_HITS = 5
+_PRODUCIBILITY_BONUS_PER_HIT = 0.1
+
 
 class NoSuitableCandidateError(RuntimeError):
     """Raised when a Research Agent run produced no candidates at all."""
+
+
+def estimate_visual_producibility(candidate: ResearchCandidate) -> float:
+    """A small, deterministic secondary signal (0.0-0.5) estimating how
+    likely a candidate's own scenes are to find honest, concrete stock
+    visuals -- based purely on how much concrete PC/gaming-hardware
+    vocabulary its title/summary already contains (see
+    _EASY_TO_ILLUSTRATE_KEYWORDS).
+
+    This is deliberately a TIE-BREAKER, not a primary ranking factor: it
+    never overrides `PILLAR_VISUAL_RELIABILITY` (a monthly_games candidate
+    mentioning "GPU" several times is still pillar-tier 0, since it still
+    needs a *specific game's* footage) -- see sort_key() below. It exists
+    because two candidates in the same pillar/tier can differ a lot in how
+    concretely illustrable they are (e.g. "should you upgrade your GPU"
+    vs. a vaguer "is PC gaming worth it" piece), and a real run producing
+    too many info-card-only scenes is exactly the failure this factor is
+    meant to reduce -- see asset_acquisition.py's own visual-density work.
+    """
+    text = f"{candidate.title} {candidate.summary or ''}".lower()
+    words = set(re.findall(r"[a-z]+", text))
+    hits = len(words & _EASY_TO_ILLUSTRATE_KEYWORDS)
+    return min(hits, _MAX_PRODUCIBILITY_KEYWORD_HITS) * _PRODUCIBILITY_BONUS_PER_HIT
 
 
 def select_topic_candidate(result: ResearchResult, preferred_title: Optional[str] = None) -> ScoredCandidate:
@@ -68,9 +111,10 @@ def select_topic_candidate(result: ResearchResult, preferred_title: Optional[str
             preferred_title,
         )
 
-    def sort_key(scored: ScoredCandidate) -> tuple[int, float]:
+    def sort_key(scored: ScoredCandidate) -> tuple[int, float, float]:
         reliability = PILLAR_VISUAL_RELIABILITY.get(scored.candidate.content_pillar, 0)
-        return (reliability, scored.overall_score)
+        producibility = estimate_visual_producibility(scored.candidate)
+        return (reliability, producibility, scored.overall_score)
 
     best = max(result.candidates, key=sort_key)
 

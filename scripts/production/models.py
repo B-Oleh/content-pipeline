@@ -12,6 +12,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+# A scene's visual production mode -- recorded so it is possible to audit,
+# from script.json alone, how "visually alive" a produced video actually
+# is (see docs/PRODUCTION_PIPELINE.md "Visual production modes"). Preferred
+# in this order: a rejected/unvalidated asset is never used in any mode.
+PRODUCTION_MODE_REAL_VISUAL = "real_visual"  # a strong (near-exact), Vision-approved match, used as-is
+PRODUCTION_MODE_HYBRID_VISUAL = "hybrid_visual"  # a genuinely relevant but not exact/strong match, real
+#   footage + a small honest headline/overlay card to add context
+PRODUCTION_MODE_INFO_CARD = "info_card"  # no honest real/contextual visual found -- a designed text card
+
 
 @dataclass
 class Scene:
@@ -25,9 +34,12 @@ class Scene:
     # Filled in by asset_acquisition.py
     asset_path: Optional[Path] = None
     asset_is_video: bool = True
-    asset_source: Optional[str] = None  # "pexels" | "pixabay"
+    asset_source: Optional[str] = None  # "pexels" | "pixabay" | "info_card"
     asset_url: Optional[str] = None
     asset_attribution: Optional[str] = None
+    # One of PRODUCTION_MODE_REAL_VISUAL / _HYBRID_VISUAL / _INFO_CARD (see
+    # above) -- None until asset_acquisition.py has processed this scene.
+    production_mode: Optional[str] = None
 
     # Filled in by voice_generation.py -- this scene's own narration audio
     # duration drives how long its visual plays (see video_assembly.py),
@@ -46,6 +58,7 @@ class Scene:
             "asset_source": self.asset_source,
             "asset_url": self.asset_url,
             "asset_attribution": self.asset_attribution,
+            "production_mode": self.production_mode,
             "audio_path": str(self.audio_path) if self.audio_path else None,
             "duration_seconds": self.duration_seconds,
         }

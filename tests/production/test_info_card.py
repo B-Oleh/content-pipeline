@@ -24,15 +24,22 @@ from scripts.production.info_card import (
     BODY_MAX_LINES,
     CARD_HEIGHT,
     CARD_WIDTH,
+    FACT_MAX_CHARS,
+    HEADLINE_MAX_CHARS,
+    HYBRID_OVERLAY_PROFILE,
+    FULL_CARD_PROFILE,
     MARGIN_H,
     MARGIN_V,
+    InfoCardError,
     TITLE_FONT_SIZE_MAX,
     TITLE_FONT_SIZE_MIN,
     TITLE_MAX_LINES,
     _block_height,
     _fit_text_block,
     _find_font_file,
+    _render_gradient_background,
     _render_text_layer,
+    render_hybrid_scene,
     render_info_card,
 )
 from scripts.production.qa import run_qa
@@ -329,3 +336,106 @@ def test_render_info_card_handles_empty_key_fact(tmp_path):
     dest = tmp_path / "card_no_fact.mp4"
     render_info_card("Only a headline", "", dest)
     assert dest.exists()
+
+
+# ---------------------------------------------------------------------------
+# Part 3: fallback info_card copy is concise (headline + one short support
+# line, not a paragraph) -- see the task's explicit "prefer headline + one
+# short supporting statement instead of paragraph-style text" requirement.
+# ---------------------------------------------------------------------------
+
+
+def test_body_max_lines_is_short_not_paragraph_style():
+    assert BODY_MAX_LINES <= 2
+
+
+def test_fact_max_chars_is_a_short_supporting_statement_not_a_paragraph():
+    assert FACT_MAX_CHARS <= 100
+
+
+def test_headline_and_fact_are_truncated_to_their_max_chars_before_layout():
+    long_headline = "H" * 500
+    long_fact = "F" * 500
+
+    layer = _render_text_layer(long_headline[:HEADLINE_MAX_CHARS], long_fact[:FACT_MAX_CHARS], _find_font_file())
+
+    assert layer.size == (CARD_WIDTH, CARD_HEIGHT)
+
+
+# ---------------------------------------------------------------------------
+# Part 3: gradient background (designed, layered, not a flat placeholder)
+# ---------------------------------------------------------------------------
+
+
+def test_gradient_background_is_full_frame_and_not_a_single_flat_color():
+    background = _render_gradient_background()
+
+    assert background.size == (CARD_WIDTH, CARD_HEIGHT)
+    top_pixel = background.getpixel((CARD_WIDTH // 2, 5))
+    bottom_pixel = background.getpixel((CARD_WIDTH // 2, CARD_HEIGHT - 5))
+    assert top_pixel != bottom_pixel  # a real top-to-bottom gradient, not one flat color
+
+
+# ---------------------------------------------------------------------------
+# Part 4: hybrid_visual overlay layout -- compact, top-anchored, distinct
+# from the full-card centered layout.
+# ---------------------------------------------------------------------------
+
+
+def test_hybrid_overlay_profile_is_top_anchored_and_more_compact_than_full_card():
+    assert HYBRID_OVERLAY_PROFILE.vertical_anchor == "top"
+    assert FULL_CARD_PROFILE.vertical_anchor == "center"
+    assert HYBRID_OVERLAY_PROFILE.body_max_lines <= FULL_CARD_PROFILE.body_max_lines
+    assert HYBRID_OVERLAY_PROFILE.title_font_size_max <= FULL_CARD_PROFILE.title_font_size_max
+
+
+def test_hybrid_overlay_text_layer_stays_within_frame_and_uses_rgba():
+    layer = _render_text_layer(LONG_TITLE, LONG_BODY, _find_font_file(), profile=HYBRID_OVERLAY_PROFILE)
+
+    assert layer.size == (CARD_WIDTH, CARD_HEIGHT)
+    assert layer.mode == "RGBA"
+
+
+@needs_ffmpeg
+def test_render_hybrid_scene_requires_an_existing_background(tmp_path):
+    missing_background = tmp_path / "does_not_exist.mp4"
+    dest = tmp_path / "hybrid.mp4"
+
+    with pytest.raises(InfoCardError):
+        render_hybrid_scene(missing_background, True, "MYTH 2", "You need a flagship GPU", dest)
+
+    assert not dest.exists()
+
+
+@needs_ffmpeg
+def test_render_hybrid_scene_with_real_video_background(tmp_path):
+    video_path = tmp_path / "bg.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=green:s=640x360:d=6", "-pix_fmt", "yuv420p", str(video_path)],
+        capture_output=True, text=True, timeout=30, check=True,
+    )
+
+    dest = tmp_path / "hybrid_video.mp4"
+    result = render_hybrid_scene(video_path, True, "MYTH 2", "You need a flagship GPU", dest)
+
+    assert result == dest
+    assert dest.exists()
+    qa_result = run_qa(dest, rendered_scene_count=1, narration_generated=True, subtitles_generated=False)
+    assert qa_result.checks["has_video_stream"]
+    assert qa_result.checks["resolution_1080x1920"]
+
+
+@needs_ffmpeg
+def test_render_hybrid_scene_with_real_photo_background(tmp_path):
+    photo_path = tmp_path / "bg.jpg"
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=blue:s=800x600", "-frames:v", "1", str(photo_path)],
+        capture_output=True, text=True, timeout=30, check=True,
+    )
+
+    dest = tmp_path / "hybrid_photo.mp4"
+    render_hybrid_scene(photo_path, False, "Gaming setup", "A clean desk goes a long way", dest)
+
+    assert dest.exists()
+    qa_result = run_qa(dest, rendered_scene_count=1, narration_generated=True, subtitles_generated=False)
+    assert qa_result.checks["has_video_stream"]

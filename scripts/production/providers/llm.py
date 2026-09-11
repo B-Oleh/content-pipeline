@@ -470,6 +470,13 @@ Rules:
   qualitative terms instead (e.g. "smoother performance" instead of "40% faster", "check current
   pricing" instead of a dollar amount).
 - Keep every sentence short and easy to follow when read aloud quickly.
+- Every scene must describe something that can visibly be shown on screen. If a fact or idea is too
+  abstract or conceptual to picture directly (e.g. "market trends are shifting" or "prices vary a
+  lot depending on many factors"), do NOT write one long abstract scene for it -- instead split it
+  into a shorter scene (or reframe it around a concrete, visible action or object: a person looking
+  at a screen, a close-up of a component, a settings menu, a desk setup) so visual_search_queries can
+  describe something a stock clip could actually show. Never invent a new fact or change the meaning
+  of a claim to make it more visual -- only reshape HOW an already-true idea is delivered and shot.
 """
 
 

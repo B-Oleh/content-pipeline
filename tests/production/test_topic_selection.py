@@ -2,7 +2,11 @@ from datetime import datetime, timezone
 
 import pytest
 
-from scripts.production.topic_selection import NoSuitableCandidateError, select_topic_candidate
+from scripts.production.topic_selection import (
+    NoSuitableCandidateError,
+    estimate_visual_producibility,
+    select_topic_candidate,
+)
 from scripts.research.models import (
     ContentPillar,
     ContentRole,
@@ -21,13 +25,14 @@ def _score_kwargs():
     }
 
 
-def _scored(candidate_id, pillar, overall_score, rank):
+def _scored(candidate_id, pillar, overall_score, rank, title=None, summary=None):
     candidate = ResearchCandidate(
         candidate_id=candidate_id,
-        title=f"Topic {candidate_id}",
+        title=title or f"Topic {candidate_id}",
         content_pillar=pillar,
         content_role=ContentRole.GROWTH,
         source_name="fixture_test",
+        summary=summary,
     )
     return ScoredCandidate(candidate=candidate, scores=ScoreBreakdown(**_score_kwargs()), overall_score=overall_score, rank=rank)
 
@@ -88,3 +93,56 @@ def test_preferred_title_falls_back_to_normal_selection_when_not_found(caplog):
 
     assert chosen.candidate.candidate_id == "a"
     assert any("no longer present" in record.message for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Part 2: visual producibility -- a secondary, same-pillar-tier tie-breaker
+# ---------------------------------------------------------------------------
+
+
+def test_estimate_visual_producibility_rewards_concrete_hardware_vocabulary():
+    concrete = _scored(
+        "a", ContentPillar.OPTIMIZATION, overall_score=5.0, rank=1,
+        title="Upgrade your GPU and RAM for a faster gaming PC build",
+    )
+    abstract = _scored(
+        "b", ContentPillar.OPTIMIZATION, overall_score=5.0, rank=2,
+        title="Is PC gaming still worth it in the long run",
+    )
+
+    assert estimate_visual_producibility(concrete.candidate) > estimate_visual_producibility(abstract.candidate)
+
+
+def test_producibility_never_overrides_pillar_reliability_tier():
+    """A monthly_games candidate stuffed with hardware vocabulary is still
+    pillar-tier 0 -- it still needs a specific game's footage, which stock
+    libraries will not have (see PILLAR_VISUAL_RELIABILITY's own
+    docstring)."""
+    hardware_heavy_low_tier = _scored(
+        "a", ContentPillar.MONTHLY_GAMES, overall_score=9.0, rank=1,
+        title="GPU CPU RAM SSD motherboard hardware build",
+    )
+    plain_high_tier = _scored("b", ContentPillar.OPTIMIZATION, overall_score=1.0, rank=2, title="Plain topic")
+
+    chosen = select_topic_candidate(_result([hardware_heavy_low_tier, plain_high_tier]))
+
+    assert chosen.candidate.candidate_id == "b"
+
+
+def test_deprioritizes_visually_weak_topic_within_the_same_reliability_tier():
+    """Two candidates in the same pillar tier with the same overall_score --
+    the one with more concrete, illustrable vocabulary is preferred, per
+    the task's "deprioritize (not exclude) candidate topics too likely to
+    become a slideshow" requirement."""
+    concrete = _scored(
+        "a", ContentPillar.OPTIMIZATION, overall_score=5.0, rank=2,
+        title="Best GPU and monitor upgrades for your gaming desktop setup",
+    )
+    abstract = _scored(
+        "b", ContentPillar.OPTIMIZATION, overall_score=5.0, rank=1,
+        title="Why gaming culture keeps changing over time",
+    )
+
+    chosen = select_topic_candidate(_result([concrete, abstract]))
+
+    assert chosen.candidate.candidate_id == "a"
