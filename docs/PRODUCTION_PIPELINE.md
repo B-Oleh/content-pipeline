@@ -33,9 +33,14 @@ scripts/production/
   topic_selection.py                   Picks one Research Agent candidate, preferring pillars that
                                         are reliably illustrated with generic stock footage
   script_agent.py                      Gemini call + the fabrication-claim guard (see below)
-  asset_acquisition.py                 Per-scene Pexels/Pixabay video (then photo) search+download
+  asset_acquisition.py                 Per-scene multi-candidate Pexels/Pixabay search, relevance
+                                        scoring, and info-card fallback (see "Visuals" below)
+  visual_relevance.py                  Deterministic metadata-only relevance scoring + shot-type
+                                        classification for candidate assets (no Gemini vision)
+  info_card.py                         Renders a designed text/graphic "information card" clip when
+                                        no honestly-matching stock asset exists
   voice_generation.py                  Per-scene edge-tts narration; scene duration = its own audio
-  subtitles.py                         Groups word timings into short caption chunks; writes .srt
+  subtitles.py                         Groups word timings into short caption chunks; writes .ass
   video_assembly.py                    ffmpeg: scale/crop to 1080x1920, concat scenes, burn subtitles
   qa.py                                ffprobe-based deterministic checks before Telegram delivery
   telegram_delivery.py                 Builds the caption, sends the MP4
@@ -60,17 +65,18 @@ Research Agent (scripts/research/cli.py::run(), reused as-is, in-memory only -- 
   -> ResearchResult
 topic_selection.select_topic_candidate() -> one ScoredCandidate
 script_agent.generate_script() -> VideoScript (topic, hook, scenes[], title, description, evidence)
-asset_acquisition.acquire_assets() -> mutates each Scene with a downloaded asset_path
+asset_acquisition.acquire_assets() -> mutates each Scene with a downloaded (or info-card-rendered)
+                                       asset_path (see "Visuals" below)
 voice_generation.generate_narration() -> mutates each Scene with audio_path + duration_seconds;
                                           returns global SubtitleCue list
-subtitles.write_srt() -> captions.srt
+subtitles.write_ass() -> captions.ass
 video_assembly.render_video() -> output/final_video.mp4 (1080x1920, H.264, AAC, burned subtitles)
 qa.run_qa() -> QAResult
   if passed: telegram_delivery.deliver_video() -> Telegram
   if failed: pipeline stops, nothing is sent (see "QA" below)
 ```
 
-Intermediate files (downloaded assets, per-scene audio, `captions.srt`, `script.json`,
+Intermediate files (downloaded assets, per-scene audio, `captions.ass`, `script.json`,
 `qa_result.json`) live under `data/production/` -- transient, gitignored, exactly like Research
 Agent's own `data/research/` (see docs/RESEARCH_AGENT.md "Persistent state vs transient output").
 The final video is written to `output/final_video.mp4` per this milestone's explicit requirement;
@@ -162,13 +168,57 @@ the Telegram caption.
 ## Visuals
 
 `providers/visual.py` implements `PexelsProvider` and `PixabayProvider` against their official,
-documented, free-tier APIs (video search first, photo search as fallback) -- no scraping. Script
-Agent is instructed to write `visual_search_queries` as generic, stock-friendly phrases (e.g.
-"gaming pc setup rgb") rather than exact game/product names, since stock libraries will not have
-that exact footage -- this is also why topic selection above prefers pillars where generic footage
-is honestly illustrative. `asset_acquisition.py` tries every query against both providers' video
-search before falling back to photo search on either; a still photo gets a mild continuous zoom
-(`zoompan` in `video_assembly.py`) so no scene sits completely static.
+documented, free-tier APIs (video search first, photo search as fallback) -- no scraping.
+
+**Query generation.** Script Agent's prompt (`providers/llm.py::_SCRIPT_JSON_INSTRUCTIONS`) requires
+3-5 CONCRETE, specific `visual_search_queries` per scene -- e.g. "gaming laptop keyboard close up",
+"desktop gpu inside pc case", "pc game performance settings menu" -- rather than vague single-word
+queries like "gaming" or "computer" that match almost anything. The prompt also asks for shot-type
+variety within a scene's own query list (close-up / hardware-detail / monitor-UI / person-use-case)
+and across scenes, and forbids naming a specific game/product/model in any query, since stock
+libraries will not have that exact footage (`SCRIPT_JSON_SCHEMA` enforces 3-5 items server-side on
+top of the prompt instruction).
+
+**Multi-candidate collection and scoring.** `asset_acquisition.py` no longer stops at the first
+search hit. For each scene it queries every one of its `visual_search_queries` against BOTH
+providers' video search (falling back to photo search only if no video candidate was found at all),
+stopping early once `MIN_CANDIDATE_POOL_SIZE` (6) candidates have been collected to stay within
+free-tier rate limits. Every candidate is scored by `visual_relevance.py::score_candidate()` --
+metadata-only (search query, the result's own page-URL slug, width/height; no image download, no
+vision-model call): this is the **deterministic metadata/query scoring fallback** the task
+explicitly permits in place of Gemini vision, chosen because a real vision call would add download +
+API-call complexity that could not be exercised/verified end-to-end from this environment, and
+because the module is structured (`ScoredCandidate` carries only a score + reason, nothing about how
+it was computed) so a vision-based scorer could be added later as an additional signal without
+changing `asset_acquisition.py`'s calling contract. **Gemini vision is NOT used anywhere in this
+pipeline today.**
+
+The score rewards specific (non-generic) keyword overlap between the scene's narration/query and the
+candidate's own page-URL slug, adds a small bonus for a closer-to-9:16 aspect ratio, and applies a
+soft penalty (not a hard rejection) when a candidate's classified shot type
+(`classify_shot_type()`: close_up / hardware_detail / monitor_ui / person_use_case /
+environment_setup) repeats the immediately preceding scene's shot type -- nudging the pipeline toward
+shot variety without ever discarding an otherwise-strong match purely for variety. Purely-generic
+terms (rgb, gaming, keyboard, monitor, pc, ...) alone are deliberately weak evidence and cannot push
+a candidate to a high score on their own -- see the task's explicit "unless it actually supports the
+scene" requirement.
+
+**Selection and fallback.** `select_best_candidate()` picks the highest-scoring candidate. If its
+score is at or above `RELEVANCE_THRESHOLD` (0.22), it is downloaded and used directly. If nothing was
+found, or the best candidate scores below the threshold, `asset_acquisition.py` renders a designed
+**information card** (`info_card.py::render_info_card()`) instead of using misleading generic
+footage -- honoring the task's explicit "never imply generic stock footage is footage of a specific
+named game, GPU, laptop, or product" rule. A below-threshold candidate (if one exists) is still
+downloaded and used as a darkened, desaturated backdrop behind the card's text rather than discarded
+outright, giving the card some real contextual texture instead of a flat color when something at
+least topically adjacent was found. The card shows a short headline (the scene's `on_screen_text`, or
+the first sentence of its narration) and, when available, a supporting fact line, with a subtle
+zoom/pan on flat or photo backgrounds (video backdrops already have their own motion). Scenes filled
+this way are marked `asset_source = "info_card"` so it is possible to audit, from `script.json`
+alone, how many scenes in a given video used a real asset vs. a generated card.
+
+A still photo (real or as an info-card backdrop) gets a mild continuous zoom (`zoompan` in
+`video_assembly.py` / `info_card.py`) so no scene sits completely static.
 
 **Secret-safety note:** Pixabay's API key travels as a `key=` URL query parameter (no header option
 in their public API). A naive `response.raise_for_status()` would embed the full request URL --
@@ -194,10 +244,33 @@ runtime by construction.
 `subtitles.py::group_words_into_cues()` groups the word-level timings edge-tts provides into short
 caption chunks: at most 6 words or ~3 seconds per cue, breaking early at a true sentence end
 (`.`/`!`/`?` -- not a comma, which produced awkward one-word captions in testing). `time_offset`
-shifts each scene's word timings onto the whole video's timeline, so one global `.srt` file covers
-the entire runtime. `video_assembly.py` burns it in via ffmpeg's `subtitles` filter with a
-`force_style` tuned for vertical mobile viewing (large font, bottom-center, `MarginV=180` to stay
-clear of the bottom safe area).
+shifts each scene's word timings onto the whole video's timeline, so one global subtitle file covers
+the entire runtime.
+
+**Why `.ass`, not `.srt`.** The first working pipeline wrote plain `.srt` and burned it in via
+ffmpeg's `subtitles` filter with a `force_style` + `original_size` combination intended to control
+font size and margins. In real rendered output this produced massively oversized captions (single
+words filling most of the frame height). Controlled experiments (comparing renders with/without
+`original_size`, byte-for-byte) showed `original_size` had no effect at all in this
+ffmpeg/libass build: the `subtitles` filter's internal SRT-to-ASS auto-conversion uses its own
+reference resolution, independent of both the real video resolution and the `original_size` option,
+so `force_style` font-size/margin values were being scaled against the wrong reference. The fix was
+to stop relying on that auto-conversion entirely: `subtitles.py::write_ass()` now writes a
+hand-authored `.ass` file with an explicit `[Script Info]` `PlayResX: 1080` / `PlayResY: 1920`
+header and a fully-specified `[V4+ Styles]` line, so libass has no ambiguous reference resolution to
+guess. `video_assembly.py::_build_subtitle_filter()` now just passes the `.ass` path through with no
+`force_style` at all -- every visual property lives in the file itself.
+
+**Chunking, not just font size.** Per the task's "fix the chunking logic rather than only shrinking
+the font" instruction, `wrap_cue_text()` guarantees every cue wraps to at most `MAX_LINES_PER_CUE`
+(2) lines by construction (splitting on an estimated max-characters-per-line for the configured font
+size/frame width, never emitting a 3rd line), on top of `group_words_into_cues()`'s existing
+`MAX_WORDS_PER_CUE` (6) and per-cue max-duration (3s) limits -- so a cue is never a long paragraph
+block. Current style constants (`subtitles.py`): `FONT_SIZE_PX = 58` (within the requested 54-64px
+range), `HORIZONTAL_MARGIN_PX = 100`, `BOTTOM_MARGIN_PX = 200` (lower-third, not flush to the bottom
+edge), `BorderStyle=1` outline+shadow (not an opaque box) for readability over any background,
+bottom-center alignment. `group_words_into_cues()` also guarantees non-overlapping, strictly
+sequential cue timing (covered by tests -- see "Testing").
 
 ## Video (ffmpeg)
 
@@ -243,7 +316,11 @@ closed.
 
 `.github/workflows/produce_video.yml` -- manually triggered only (`workflow_dispatch`; no
 `schedule`/`cron`/`repository_dispatch`). Steps: checkout -> Python 3.11 -> install dependencies ->
-ensure ffmpeg is installed (checks first, `apt-get install` only if missing) -> run the full
+ensure ffmpeg AND a text-rendering font are installed (checks first, `apt-get install` only if
+missing -- `info_card.py`'s `drawtext` filter needs a real font *file*: it does not rely on
+fontconfig resolving a font by name, since a broken/missing fontconfig config was observed locally
+on Windows; `fonts-dejavu-core` guarantees one of `info_card.py`'s documented font paths exists on
+the Ubuntu runner) -> run the full
 automated test suite -> preflight (`python -m scripts.production.preflight`, its own step so a
 credential problem fails clearly and immediately) -> `python -m scripts.produce_video` (research
 through Telegram delivery). `permissions: contents: read` -- this workflow never commits or pushes
@@ -264,11 +341,18 @@ real MP4?"), the centerpiece test is
 synthetic scenes (`lavfi` color/tone sources, no network, no API keys) through the actual
 `video_assembly.py` + `qa.py` code and asserts QA passes -- this is the one test that most directly
 answers that question, and it needs only ffmpeg (skips gracefully if ffmpeg/ffprobe are not on
-PATH). Everything else follows CLAUDE.md's no-public-internet-for-unit-tests rule via mocked HTTP
-(providers) or fake in-memory providers (`script_agent.py`), matching the pattern already
-established in `tests/research/`. Real Gemini/Pexels/Pixabay/edge-tts/Telegram connectivity is only
-exercised for real inside the GitHub Actions workflow itself -- see the top-level report for what
-that means was and wasn't verifiable during development.
+PATH). `tests/production/test_info_card.py` and the below-threshold cases in
+`tests/production/test_asset_acquisition.py` follow the same real-ffmpeg-with-graceful-skip pattern,
+since both genuinely render an MP4. `tests/production/test_subtitles.py` covers the chunking/wrapping
+guarantees (max 2 lines, max words/cue, non-overlapping cue timing) and `.ass` output format with no
+ffmpeg dependency (pure Python). `tests/production/test_visual_relevance.py` covers keyword
+extraction, shot-type classification, and scoring behavior (specific-match reward, generic-term
+penalty, aspect bonus, shot-type-repetition penalty) with fake `AssetResult`/`Scene` objects, no
+network. Everything else follows CLAUDE.md's no-public-internet-for-unit-tests rule via mocked HTTP
+(providers) or fake in-memory providers (`script_agent.py`, `asset_acquisition.py`), matching the
+pattern already established in `tests/research/`. Real Gemini/Pexels/Pixabay/edge-tts/Telegram
+connectivity is only exercised for real inside the GitHub Actions workflow itself -- see the
+top-level report for what that means was and wasn't verifiable during development.
 
 ## Possible next steps (not implemented)
 

@@ -23,7 +23,7 @@ from scripts.production.providers.visual import PexelsProvider, PixabayProvider
 from scripts.production.providers.voice import EdgeTtsProvider
 from scripts.production.qa import run_qa
 from scripts.production.script_agent import generate_script
-from scripts.production.subtitles import write_srt
+from scripts.production.subtitles import write_ass
 from scripts.production.telegram_delivery import deliver_video
 from scripts.production.topic_selection import select_topic_candidate
 from scripts.production.video_assembly import render_video
@@ -78,11 +78,11 @@ def run_pipeline(
     logger.info("Stage: Voice Generation (edge-tts) + Subtitles")
     voice_provider = EdgeTtsProvider()
     subtitle_cues = generate_narration(script.scenes, voice_provider, workdir)
-    srt_path = workdir / "captions.srt"
-    write_srt(subtitle_cues, srt_path)
+    subtitle_path = workdir / "captions.ass"
+    write_ass(subtitle_cues, subtitle_path)
 
     logger.info("Stage: Video Assembly (ffmpeg)")
-    video_path = render_video(script.scenes, Path(output_path), subtitle_path=srt_path)
+    video_path = render_video(script.scenes, Path(output_path), subtitle_path=subtitle_path)
 
     logger.info("Stage: Automated QA")
     qa_result = run_qa(

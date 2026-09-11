@@ -52,11 +52,19 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Ensure ffmpeg is installed
+      - name: Ensure ffmpeg and a text-rendering font are installed
         run: |
           if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
             sudo apt-get update
             sudo apt-get install -y ffmpeg
+          fi
+          # info_card.py's drawtext filter needs a real font *file* (it does
+          # not rely on fontconfig resolving a font by name -- see that
+          # module's docstring for why); fonts-dejavu-core guarantees one of
+          # its documented font paths always exists on this runner.
+          if [ ! -f /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf ]; then
+            sudo apt-get update
+            sudo apt-get install -y fonts-dejavu-core
           fi
           ffmpeg -version
           ffprobe -version

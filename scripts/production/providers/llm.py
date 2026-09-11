@@ -87,7 +87,12 @@ SCRIPT_JSON_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "narration_line": {"type": "string"},
                     "on_screen_text": {"type": "string"},
-                    "visual_search_queries": {"type": "array", "items": {"type": "string"}},
+                    "visual_search_queries": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 3,
+                        "maxItems": 5,
+                    },
                 },
                 "required": ["narration_line"],
             },
@@ -184,7 +189,7 @@ Respond with ONLY a single JSON object (no markdown fences, no commentary) with 
     {{
       "narration_line": "1-2 short spoken sentences for this scene",
       "on_screen_text": "very short on-screen caption text, or empty string",
-      "visual_search_queries": ["generic stock-footage search phrase", "another one"]
+      "visual_search_queries": ["3 to 5 concrete, specific stock-footage search phrases for THIS scene"]
     }}
   ],
   "evidence_references": ["short phrase naming which piece of evidence supports a claim, or general phrase if none needed"]
@@ -194,11 +199,19 @@ Rules:
 - Produce 4 to 6 scenes.
 - Total spoken narration (hook + every scene's narration_line combined) must read aloud in
   approximately 30-45 seconds at a natural pace (roughly 90-115 words total).
-- visual_search_queries must be GENERIC, stock-footage-friendly phrases (e.g. "gaming pc setup rgb",
-  "person typing keyboard closeup", "computer hardware close up") -- never a specific game title or
-  exact product name, since stock video libraries will not have that exact footage. Do not write
-  narration or on_screen_text that claims the video is showing a specific named product or game if
-  only generic footage will illustrate it -- keep such lines honest about being illustrative/generic.
+- Each scene's visual_search_queries must contain 3 to 5 CONCRETE, specific phrases describing what
+  should visibly be on screen for THAT scene -- specific enough that a stock-video search would return
+  a genuinely matching clip. Bad (too vague): "gaming", "computer". Better: "gaming laptop keyboard
+  close up", "desktop gpu inside pc case", "pc game performance settings menu", "person comparing
+  computer hardware", "high refresh rate gaming monitor". Vary what each query describes across the
+  list for one scene (e.g. a close-up, a hardware-detail shot, a monitor/UI shot, a person/use-case
+  shot) so the pipeline has real options to choose from, not five near-duplicate phrasings of the same
+  shot. Also vary the dominant shot type ACROSS scenes -- avoid every scene being the same kind of shot
+  (e.g. all close-ups, or all person-at-desk shots).
+- Never write a visual_search_queries phrase that names a specific game title or exact product/model
+  name -- stock video libraries will not have that exact footage. Do not write narration or
+  on_screen_text that claims the video is showing a specific named product or game if only generic
+  footage will illustrate it -- keep such lines honest about being illustrative/generic.
 - NEVER state a specific FPS number, benchmark result, price, exact hardware specification, release
   date, popularity/sales statistic, or performance percentage unless it is explicitly present in the
   evidence provided below. If the evidence does not support a specific number, speak in general,

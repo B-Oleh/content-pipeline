@@ -16,7 +16,7 @@ import pytest
 
 from scripts.production.models import Scene, SubtitleCue
 from scripts.production.qa import run_qa
-from scripts.production.subtitles import write_srt
+from scripts.production.subtitles import write_ass
 from scripts.production.video_assembly import render_video
 
 pytestmark = pytest.mark.skipif(
@@ -68,17 +68,17 @@ def test_render_and_qa_a_real_synthetic_video(tmp_path):
             )
         )
 
-    srt_path = tmp_path / "captions.srt"
-    write_srt(
+    subtitle_path = tmp_path / "captions.ass"
+    write_ass(
         [
             SubtitleCue(index=1, start=0.0, end=1.0, text="Scene zero."),
             SubtitleCue(index=2, start=2.5, end=3.5, text="Scene one."),
         ],
-        srt_path,
+        subtitle_path,
     )
 
     output_path = tmp_path / "final_video.mp4"
-    result_path = render_video(scenes, output_path, subtitle_path=srt_path)
+    result_path = render_video(scenes, output_path, subtitle_path=subtitle_path)
 
     assert result_path == output_path
     assert output_path.exists()

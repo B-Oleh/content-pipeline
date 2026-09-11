@@ -25,14 +25,6 @@ TARGET_WIDTH = 1080
 TARGET_HEIGHT = 1920
 TARGET_FPS = 30
 
-# Readable at 1080x1920 without crowding the frame; MarginV keeps captions
-# well clear of the bottom edge (mobile UI safe area) -- see "Subtitles"
-# design in docs/PRODUCTION_PIPELINE.md.
-_SUBTITLE_STYLE = (
-    "FontSize=54,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
-    "BorderStyle=3,Outline=3,Shadow=0,MarginV=180,Alignment=2"
-)
-
 
 class VideoAssemblyError(RuntimeError):
     pass
@@ -47,6 +39,22 @@ def _escape_filter_path(path: Path) -> str:
     """
     text = str(path).replace("\\", "/")
     return text.replace(":", "\\:")
+
+
+def _build_subtitle_filter(subtitle_path: Path) -> str:
+    """The subtitles-filter fragment burning captions onto [vconcat].
+
+    No force_style/original_size here: subtitle_path is an .ass file (see
+    subtitles.py) that already declares its own PlayResX/PlayResY matching
+    this module's TARGET_WIDTH/TARGET_HEIGHT and its own Style (font size,
+    margins, colors, outline). Font-size/margin pixel values are therefore
+    applied 1:1 against the real frame -- see subtitles.py's module
+    docstring for why relying on ffmpeg's automatic SRT->ASS conversion
+    plus force_style/original_size instead produced captions rendered
+    several times larger than requested ("subtitles are too large" bug).
+    """
+    escaped = _escape_filter_path(Path(subtitle_path))
+    return f"subtitles='{escaped}'"
 
 
 def render_video(scenes: list[Scene], output_path: Path, subtitle_path: Optional[Path] = None) -> Path:
@@ -104,8 +112,7 @@ def render_video(scenes: list[Scene], output_path: Path, subtitle_path: Optional
 
     video_map = "[vconcat]"
     if subtitle_path is not None:
-        escaped = _escape_filter_path(Path(subtitle_path))
-        filter_parts.append(f"[vconcat]subtitles='{escaped}':force_style='{_SUBTITLE_STYLE}'[vsub]")
+        filter_parts.append(f"[vconcat]{_build_subtitle_filter(subtitle_path)}[vsub]")
         video_map = "[vsub]"
 
     filter_complex = ";".join(filter_parts)
