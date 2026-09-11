@@ -7,6 +7,18 @@ Reads GEMINI_API_KEY, PEXELS_API_KEY, PIXABAY_API_KEY, TELEGRAM_BOT_TOKEN,
 TELEGRAM_CHAT_ID from the environment (GitHub Secrets in CI, .env locally --
 see CLAUDE.md "Environment variables and secret handling"). Never logs
 their values. See docs/PRODUCTION_PIPELINE.md for the full pipeline design.
+
+Also reads three optional environment variables used only by the Telegram
+"Regenerate" button (see telegram_approval.py):
+- GITHUB_TOKEN: the workflow's own default token (needs `actions: write`
+  permission -- see produce_video.yml), used to trigger a new run of this
+  same workflow. Not a new secret to create -- GitHub Actions provides this
+  automatically to every workflow run.
+- GITHUB_REPOSITORY: also provided automatically by GitHub Actions
+  (`owner/repo`); not needed locally.
+- TOPIC_OVERRIDE: set by produce_video.yml from the workflow_dispatch
+  `topic_override` input when a run was started by a Regenerate click, so
+  topic_selection.py can prefer re-selecting the same topic.
 """
 
 from __future__ import annotations
@@ -37,6 +49,9 @@ def main(argv: list[str] | None = None) -> None:
     pixabay_api_key = os.getenv("PIXABAY_API_KEY")
     telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    github_token = os.getenv("GITHUB_TOKEN")
+    github_repository = os.getenv("GITHUB_REPOSITORY")
+    topic_override = os.getenv("TOPIC_OVERRIDE") or None
 
     logger.info("Running preflight checks")
     try:
@@ -64,6 +79,9 @@ def main(argv: list[str] | None = None) -> None:
         telegram_chat_id=telegram_chat_id,
         workdir=args.workdir,
         output_path=args.output,
+        topic_override=topic_override,
+        github_token=github_token,
+        github_repository=github_repository,
     )
 
     print(f"Video: {result.video_path}")
@@ -71,6 +89,8 @@ def main(argv: list[str] | None = None) -> None:
     for line in result.qa_result.summary_lines():
         print(f"  {line}")
     print(f"Delivered to Telegram: {result.delivered}")
+    if result.approval is not None:
+        print(f"Approval decision: {result.approval.decision} ({result.approval.detail})")
 
     if not result.qa_result.passed:
         sys.exit(1)

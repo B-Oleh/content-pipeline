@@ -8,6 +8,7 @@ class here.
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from typing import Any
@@ -51,6 +52,13 @@ class GeminiPingError(RuntimeError):
     script generation problem (see preflight.py)."""
 
 
+class VisionEvaluationError(RuntimeError):
+    """Raised when a Gemini Vision call for candidate-asset relevance fails
+    or returns no usable output (see vision_validation.py, which catches
+    this per-candidate so one failed evaluation cannot abort a whole
+    scene's asset search)."""
+
+
 def find_fabrication_risks(text: str) -> list[str]:
     """Return a list of human-readable violations found in text, if any."""
     violations = []
@@ -65,6 +73,14 @@ class LlmProvider:
 
     def generate_script(self, prompt: str) -> str:
         """Return the raw text response for a fully-built prompt."""
+        raise NotImplementedError
+
+    def evaluate_visual_candidate(self, image_bytes: bytes, mime_type: str, prompt: str) -> str:
+        """Return the raw JSON text response for a vision-based relevance
+        evaluation of one candidate image (see vision_validation.py, which
+        owns the prompt content and response parsing -- this method is only
+        the thin vendor-call boundary, per CLAUDE.md "Provider abstraction").
+        """
         raise NotImplementedError
 
 
@@ -100,6 +116,20 @@ SCRIPT_JSON_SCHEMA: dict[str, Any] = {
         "evidence_references": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["title", "description", "hook", "scenes"],
+}
+
+# JSON schema for the Gemini Vision candidate-relevance call (see
+# vision_validation.py, which owns the actual prompt text and hard
+# rejection rules -- this schema only shapes the response).
+VISION_EVALUATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "computer_domain": {"type": "boolean"},
+        "scene_relevance_score": {"type": "integer"},
+        "misleading": {"type": "boolean"},
+        "reason": {"type": "string"},
+    },
+    "required": ["computer_domain", "scene_relevance_score", "misleading", "reason"],
 }
 
 _PING_PROMPT = "Reply exactly with OK"
@@ -161,6 +191,38 @@ class GeminiProvider(LlmProvider):
         text = getattr(interaction, "output_text", None)
         if not text:
             raise ScriptGenerationError(_describe_incomplete_interaction(interaction))
+        return text
+
+    def evaluate_visual_candidate(self, image_bytes: bytes, mime_type: str, prompt: str) -> str:
+        """One multimodal (text + image) Interactions call -- confirmed
+        against the real, installed google-genai SDK's own request model
+        that `input` must be a list of `{"type": "user_input", "content":
+        [...]}` steps (a bare list of content dicts is silently
+        misinterpreted as unrecognized "steps", not content -- see
+        tests/production/test_gemini_provider.py for the same real-SDK
+        validation approach used for generate_script's response_format).
+        """
+        image_b64 = base64.b64encode(image_bytes).decode("ascii")
+        interaction = self._client.interactions.create(
+            model=self._model,
+            input=[
+                {
+                    "type": "user_input",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image", "data": image_b64, "mime_type": mime_type},
+                    ],
+                }
+            ],
+            response_format={
+                "type": "text",
+                "mime_type": "application/json",
+                "schema": VISION_EVALUATION_SCHEMA,
+            },
+        )
+        text = getattr(interaction, "output_text", None)
+        if not text:
+            raise VisionEvaluationError(_describe_incomplete_interaction(interaction))
         return text
 
     def ping(self) -> None:

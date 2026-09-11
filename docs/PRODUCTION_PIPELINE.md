@@ -1,10 +1,10 @@
 # Video Production Pipeline
 
 First end-to-end milestone that turns one Research Agent topic into a real rendered vertical MP4
-delivered to Telegram. Covers CLAUDE.md pipeline stages 4-10 (Script Agent, Visual Planner, Asset
-Acquisition, Voice Generation, Video Assembly, Automated QA, Telegram — approval buttons excluded
-for now, see "Telegram delivery" below). Stage 1 (Research Agent) is reused unchanged — see
-[docs/RESEARCH_AGENT.md](RESEARCH_AGENT.md).
+delivered to Telegram with real, actually-handled Approve/Regenerate/Reject buttons. Covers
+CLAUDE.md pipeline stages 4-10 (Script Agent, Visual Planner, Asset Acquisition, Voice Generation,
+Video Assembly, Automated QA, Telegram approval gate — see "Telegram approval gate" below). Stage 1
+(Research Agent) is reused unchanged — see [docs/RESEARCH_AGENT.md](RESEARCH_AGENT.md).
 
 Engineering rules (secrets, dependencies, logging, testing, provider abstraction) are defined once
 in CLAUDE.md and are not repeated here.
@@ -12,11 +12,13 @@ in CLAUDE.md and are not repeated here.
 ## Goal and non-goals
 
 The goal of this milestone is narrow and concrete: **one manual GitHub Actions run produces one
-real MP4 and delivers it to Telegram.** Everything here is built to reach that, and no further:
+real MP4, delivers it to Telegram with working Approve/Regenerate/Reject buttons, and actually
+handles a click on one of them.** Everything here is built to reach that, and no further:
 
-- No Telegram Approve/Regenerate/Reject buttons yet (webhooks/callbacks are a separate milestone).
+- No YouTube publishing yet -- Approve only records state as a clean integration point (see
+  "Telegram approval gate" below).
 - No scheduling/cron.
-- No YouTube publishing, analytics, or affiliate automation.
+- No analytics or affiliate automation.
 - No background music (narration-only audio for the first working pipeline).
 - No topic-history/game-history updates from this pipeline (see "Relationship to Research Agent
   state" below) -- that stays exclusively Research Agent's own concern.
@@ -33,24 +35,31 @@ scripts/production/
   topic_selection.py                   Picks one Research Agent candidate, preferring pillars that
                                         are reliably illustrated with generic stock footage
   script_agent.py                      Gemini call + the fabrication-claim guard (see below)
-  asset_acquisition.py                 Per-scene multi-candidate Pexels/Pixabay search, relevance
-                                        scoring, and info-card fallback (see "Visuals" below)
-  visual_relevance.py                  Deterministic metadata-only relevance scoring + shot-type
-                                        classification for candidate assets (no Gemini vision)
+  asset_acquisition.py                 Per-scene multi-candidate Pexels/Pixabay search, metadata
+                                        shortlist, Gemini Vision validation, info-card fallback
+                                        (see "Visuals" below)
+  visual_relevance.py                  Deterministic metadata-only relevance PRE-FILTER + shot-type
+                                        classification -- builds the shortlist, does not decide
+  vision_validation.py                 Gemini Vision: the actual accept/reject relevance decision
+                                        over each scene's metadata shortlist (see "Visuals" below)
   info_card.py                         Renders a designed text/graphic "information card" clip when
                                         no honestly-matching stock asset exists
   voice_generation.py                  Per-scene edge-tts narration; scene duration = its own audio
   subtitles.py                         Groups word timings into short caption chunks; writes .ass
   video_assembly.py                    ffmpeg: scale/crop to 1080x1920, concat scenes, burn subtitles
   qa.py                                ffprobe-based deterministic checks before Telegram delivery
-  telegram_delivery.py                 Builds the caption, sends the MP4
+  telegram_delivery.py                 Builds the caption + approval keyboard, sends the MP4
+  telegram_approval.py                 Real Approve/Regenerate/Reject handling: keyboard, callback
+                                        parsing, bounded long-poll wait, regeneration dispatch (see
+                                        "Telegram approval gate" below)
   pipeline.py                          Orchestrates all of the above, in order
   ffmpeg_utils.py                      Shared ffprobe/ffmpeg-binary helpers
   providers/
-    llm.py                             LlmProvider interface + GeminiProvider
+    llm.py                             LlmProvider interface + GeminiProvider (script text + Vision)
     visual.py                          VisualAssetProvider interface + PexelsProvider/PixabayProvider
     voice.py                           VoiceProvider interface + EdgeTtsProvider
-    telegram_client.py                 Thin Telegram Bot API client (getMe, sendVideo)
+    telegram_client.py                 Telegram Bot API client: sendVideo (with buttons), getUpdates,
+                                        answerCallbackQuery, sendMessage
 .github/workflows/produce_video.yml   Manually triggered (workflow_dispatch only) full run
 ```
 
@@ -72,13 +81,16 @@ voice_generation.generate_narration() -> mutates each Scene with audio_path + du
 subtitles.write_ass() -> captions.ass
 video_assembly.render_video() -> output/final_video.mp4 (1080x1920, H.264, AAC, burned subtitles)
 qa.run_qa() -> QAResult
-  if passed: telegram_delivery.deliver_video() -> Telegram
+  if passed: telegram_delivery.deliver_video() -> Telegram (video + Approve/Regenerate/Reject buttons)
+             telegram_approval.poll_for_decision() -> ApprovalState (bounded wait -- see below)
+             REGENERATE -> telegram_approval.trigger_regeneration_workflow() -> new produce_video.yml run
   if failed: pipeline stops, nothing is sent (see "QA" below)
 ```
 
 Intermediate files (downloaded assets, per-scene audio, `captions.ass`, `script.json`,
-`qa_result.json`) live under `data/production/` -- transient, gitignored, exactly like Research
-Agent's own `data/research/` (see docs/RESEARCH_AGENT.md "Persistent state vs transient output").
+`qa_result.json`, `approval_state.json`) live under `data/production/` -- transient, gitignored,
+exactly like Research Agent's own `data/research/` (see docs/RESEARCH_AGENT.md "Persistent state vs
+transient output").
 The final video is written to `output/final_video.mp4` per this milestone's explicit requirement;
 `output/` is also gitignored (see CLAUDE.md "Repository structure") -- **the video is never
 committed to Git.**
@@ -110,6 +122,14 @@ real run:
 If no candidate falls in a reliable pillar, the single best-ranked candidate is used anyway (with a
 logged warning) rather than failing the run -- CLAUDE.md priorities (see "Priorities") were not
 asked to be relaxed, but a hard stop here would defeat the milestone's purpose of proving delivery.
+
+`select_topic_candidate()` also takes an optional `preferred_title` -- set from the `TOPIC_OVERRIDE`
+environment variable, in turn set by produce_video.yml's `topic_override` workflow_dispatch input
+when a run was started by a Telegram "Regenerate" click (see "Telegram approval gate" below). If a
+candidate with that exact title exists in this run's fresh Research Agent results, it is selected
+directly; if it is no longer present (Research Agent re-runs from scratch each time, so an identical
+candidate set is not guaranteed), selection falls back to the normal logic above with a logged
+warning rather than failing the run.
 
 ## Gemini (Script Agent)
 
@@ -165,6 +185,27 @@ The hook is spoken over scene 0's visual (merged into that scene's `narration_li
 purposes) rather than treated as its own scene; `VideoScript.hook` still holds it separately for
 the Telegram caption.
 
+## Gemini Vision (visual relevance)
+
+`GeminiProvider.evaluate_visual_candidate(image_bytes, mime_type, prompt)` -- used by
+`vision_validation.py`, see "Visuals" below for the calling logic -- is a second, multimodal use of
+the same Interactions API `generate_script()` uses, not a separate SDK or vendor. The one real
+mechanical wrinkle: `client.interactions.create(input=...)` accepts a plain string, a `Content`
+object/list, or a list of `Step` objects, but a bare list of content dicts
+(`[{"type": "text", ...}, {"type": "image", ...}]`) is silently misinterpreted by the installed
+`google-genai` SDK as a list of unrecognized "steps," not as message content -- it must be wrapped as
+one `{"type": "user_input", "content": [...]}` step. This was confirmed directly against the
+installed SDK's own request-validation model (`google.genai.interactions.CreateModelInteraction`,
+the same technique `test_generate_script_response_format_validates_against_the_real_sdk_request_model`
+already used for `generate_script()`'s `response_format` key) before being relied on --
+see `tests/production/test_gemini_provider.py::test_evaluate_visual_candidate_request_validates_against_the_real_sdk_request_model`.
+Image bytes travel base64-encoded in the `data` field with an explicit `mime_type`; the response
+goes through the same `response_format={"schema": ...}` mechanism as `generate_script()`, with its
+own `VISION_EVALUATION_SCHEMA` (`computer_domain`, `scene_relevance_score`, `misleading`, `reason`).
+A missing/empty response raises `VisionEvaluationError` (distinct from `ScriptGenerationError`/
+`GeminiPingError`, same reasoning as those two: a Vision-call failure should never be reported or
+handled as if it were a different kind of Gemini failure).
+
 ## Visuals
 
 `providers/visual.py` implements `PexelsProvider` and `PixabayProvider` against their official,
@@ -179,45 +220,61 @@ and across scenes, and forbids naming a specific game/product/model in any query
 libraries will not have that exact footage (`SCRIPT_JSON_SCHEMA` enforces 3-5 items server-side on
 top of the prompt instruction).
 
-**Multi-candidate collection and scoring.** `asset_acquisition.py` no longer stops at the first
-search hit. For each scene it queries every one of its `visual_search_queries` against BOTH
-providers' video search (falling back to photo search only if no video candidate was found at all),
-stopping early once `MIN_CANDIDATE_POOL_SIZE` (6) candidates have been collected to stay within
-free-tier rate limits. Every candidate is scored by `visual_relevance.py::score_candidate()` --
-metadata-only (search query, the result's own page-URL slug, width/height; no image download, no
-vision-model call): this is the **deterministic metadata/query scoring fallback** the task
-explicitly permits in place of Gemini vision, chosen because a real vision call would add download +
-API-call complexity that could not be exercised/verified end-to-end from this environment, and
-because the module is structured (`ScoredCandidate` carries only a score + reason, nothing about how
-it was computed) so a vision-based scorer could be added later as an additional signal without
-changing `asset_acquisition.py`'s calling contract. **Gemini vision is NOT used anywhere in this
-pipeline today.**
+**Multi-candidate collection and metadata pre-filter.** `asset_acquisition.py` no longer stops at
+the first search hit. For each scene it queries every one of its `visual_search_queries` against
+BOTH providers' video search (falling back to photo search only if no video candidate was found at
+all), stopping early once `MIN_CANDIDATE_POOL_SIZE` (6) candidates have been collected to stay
+within free-tier rate limits. Every candidate is first scored by
+`visual_relevance.py::score_candidate()` -- metadata-only (search query, the result's own page-URL
+slug, width/height; no image download) -- and only the top `SHORTLIST_SIZE` (3) candidates, best
+metadata score first, are kept.
 
-The score rewards specific (non-generic) keyword overlap between the scene's narration/query and the
-candidate's own page-URL slug, adds a small bonus for a closer-to-9:16 aspect ratio, and applies a
-soft penalty (not a hard rejection) when a candidate's classified shot type
-(`classify_shot_type()`: close_up / hardware_detail / monitor_ui / person_use_case /
-environment_setup) repeats the immediately preceding scene's shot type -- nudging the pipeline toward
-shot variety without ever discarding an otherwise-strong match purely for variety. Purely-generic
-terms (rgb, gaming, keyboard, monitor, pc, ...) alone are deliberately weak evidence and cannot push
-a candidate to a high score on their own -- see the task's explicit "unless it actually supports the
-scene" requirement.
+**This metadata score is a pre-filter only, not the relevance decision.** An earlier version of this
+pipeline used it as the final decision (the "deterministic metadata/query scoring fallback"), and
+real production output showed exactly why that is insufficient: a paper greeting card was selected
+for a "graphics card" narration scene (both share the word "card"), and a grocery-store shelf was
+selected for a "discounts" scene (both matched generic sale-adjacent keywords). Keyword/URL overlap
+has no notion of what is actually depicted in an image. The metadata score still rewards specific
+(non-generic) keyword overlap, a closer-to-9:16 aspect-ratio bonus, and a soft shot-type-repetition
+penalty for variety (`classify_shot_type()`: close_up / hardware_detail / monitor_ui /
+person_use_case / environment_setup) -- it is simply demoted to "cheap first-pass ranking signal,"
+per the task's own explicit allowance for this.
 
-**Selection and fallback.** `select_best_candidate()` picks the highest-scoring candidate. If its
-score is at or above `RELEVANCE_THRESHOLD` (0.22), it is downloaded and used directly. If nothing was
-found, or the best candidate scores below the threshold, `asset_acquisition.py` renders a designed
-**information card** (`info_card.py::render_info_card()`) instead of using misleading generic
-footage -- honoring the task's explicit "never imply generic stock footage is footage of a specific
-named game, GPU, laptop, or product" rule. A below-threshold candidate (if one exists) is still
-downloaded and used as a darkened, desaturated backdrop behind the card's text rather than discarded
-outright, giving the card some real contextual texture instead of a flat color when something at
-least topically adjacent was found. The card shows a short headline (the scene's `on_screen_text`, or
-the first sentence of its narration) and, when available, a supporting fact line, with a subtle
-zoom/pan on flat or photo backgrounds (video backdrops already have their own motion). Scenes filled
-this way are marked `asset_source = "info_card"` so it is possible to audit, from `script.json`
-alone, how many scenes in a given video used a real asset vs. a generated card.
+**Gemini Vision makes the final decision.** `vision_validation.py::select_vision_validated_candidate()`
+takes the metadata shortlist and, for EVERY candidate in it (not stopping at the first one that
+passes), downloads only a small static preview/thumbnail (`AssetResult.thumbnail_url` -- Pexels
+video's `image` field, Pexels photo's `src.small`, Pixabay video's `videos.<size>.thumbnail`,
+Pixabay photo's `previewURL`; never the full video/photo file at this stage) and sends it to Gemini
+alongside the scene's narration, intent, search query, and an explicit content-domain anchor ("The
+content domain is PC gaming, gaming hardware, computer components, gaming technology, or game
+recommendations.") via `GeminiProvider.evaluate_visual_candidate()` (a multimodal Interactions API
+call -- see "Gemini Vision (visual relevance)" below). Gemini returns `{"computer_domain": bool,
+"scene_relevance_score": 0-100, "misleading": bool, "reason": str}`. A candidate passes only if
+`computer_domain` is true, `misleading` is false, AND `scene_relevance_score >=
+VISION_RELEVANCE_THRESHOLD` (70); among every candidate that passes, the one with the **highest**
+`scene_relevance_score` is selected -- a 72 never wins over a 94 just because it was evaluated first.
+This still bounds Gemini Vision calls to at most `SHORTLIST_SIZE` (3) per scene (per the task's
+"avoid using Gemini Vision on excessive candidates" requirement) rather than every raw search hit --
+the shortlist size controls cost, not an early-exit. A candidate with no `thumbnail_url`, or one
+whose Vision call itself fails (network, malformed response), is treated as rejected rather than
+crashing the scene's search or silently falling back to the metadata score.
 
-A still photo (real or as an info-card backdrop) gets a mild continuous zoom (`zoompan` in
+**Fallback: information card, with NO rejected asset in it.** If every shortlisted candidate is
+rejected (or none was found at all), `asset_acquisition.py` renders a designed **information card**
+(`info_card.py::render_info_card()`) with a plain flat designed background -- instead of using
+misleading generic footage -- honoring the task's explicit "never imply generic stock footage is
+footage of a specific named game, GPU, laptop, or product" rule, and its explicit "do not use the
+best bad candidate" instruction. A rejected candidate is **never downloaded and never appears
+anywhere in the rendered video** -- not as scene footage, not as a photo, and not as an
+information-card background (darkened/blurred or otherwise): a grocery-store shelf rejected for a
+PC-hardware-discount scene must never appear in that scene in any form, so `_use_info_card()` does
+not attempt any backdrop download at all. The card shows a short headline (the scene's
+`on_screen_text`, or the first sentence of its narration) and, when available, a supporting fact
+line, with a subtle zoom/pan over its flat background. Scenes filled this way are marked
+`asset_source = "info_card"` so it is possible to audit, from `script.json` alone, how many scenes
+in a given video used a real Vision-approved asset vs. a generated card.
+
+A still photo (a genuinely Vision-approved one) gets a mild continuous zoom (`zoompan` in
 `video_assembly.py` / `info_card.py`) so no scene sits completely static.
 
 **Secret-safety note:** Pixabay's API key travels as a `key=` URL query parameter (no header option
@@ -291,15 +348,70 @@ success. **If any check fails, `pipeline.py` does not call Telegram at all** -- 
 video is ever delivered as if it were a success (see CLAUDE.md "Quality control checklist" and
 "Stage scripts should fail loudly").
 
-## Telegram delivery
+## Telegram approval gate
 
-`providers/telegram_client.py` is a thin Bot API client: `getMe()` for preflight, `sendVideo()` for
-delivery -- no callback/webhook handling. The caption (`telegram_delivery.py::build_caption()`)
+`providers/telegram_client.py` is a Bot API client: `getMe()` for preflight, `sendVideo()` (now
+accepting an optional `reply_markup` for the inline keyboard) for delivery, `sendMessage()` for
+confirmations, `getUpdates()` for receiving callback clicks, and `answerCallbackQuery()` to clear a
+button's client-side "loading" spinner. The caption (`telegram_delivery.py::build_caption()`)
 includes the topic, proposed title, content role, why it was selected (Research Agent's own scoring
 reasoning), the overall research score, and a note on how many scoring dimensions are backed by
-real evidence vs heuristic (see docs/RESEARCH_AGENT.md "Heuristic vs real data"). Approve/Regenerate
-/Reject buttons are explicitly out of scope for this milestone (see CLAUDE.md "Telegram approval
-gate" -- that stage still needs webhook infrastructure this milestone does not build).
+real evidence vs heuristic (see docs/RESEARCH_AGENT.md "Heuristic vs real data").
+`deliver_video()` attaches `telegram_approval.py::build_approval_keyboard(content_id)` -- one row of
+✅ Approve / 🔄 Regenerate / ❌ Reject, each button's `callback_data` shaped `action:content_id`.
+`content_id` is `VideoScript.candidate_id` (populated from `ResearchCandidate.candidate_id`, required
+and non-empty), so a later decision always maps back to the exact generated video; `deliver_video()`
+raises loudly if it is somehow unset rather than sending unmappable buttons.
+
+**Why polling from inside the same GitHub Actions run, not a webhook.** A Telegram button click only
+reaches a bot via a webhook (an always-listening HTTPS endpoint Telegram calls instantly) or long
+polling (`getUpdates`). GitHub Actions runners are ephemeral -- they exist only for one job's
+duration -- so there is nowhere for a webhook to be received once the job ends; standing up a
+persistent webhook receiver would mean a new always-on hosting service outside this repository's
+existing $0/GitHub-Actions architecture, which neither CLAUDE.md "Cloud execution and budget" nor
+this task's own instructions allow without that being explicitly revisited first. The mechanism this
+task explicitly asked for instead -- "the smallest practical callback-handling mechanism compatible
+with the current GitHub Actions architecture" -- is what `telegram_approval.py::poll_for_decision()`
+does: right after delivery, the **same** workflow run long-polls Telegram's own `getUpdates` endpoint
+in a bounded loop (`DEFAULT_POLL_TIMEOUT_SECONDS` = 1200s / 20 minutes). Each `getUpdates` call blocks
+server-side for up to 25s waiting for a new update before returning, so the whole window costs on the
+order of ~48 HTTP requests, not a busy loop -- this is the practical $0/GitHub-Actions-only limit of
+CLAUDE.md's "favor event-driven ... over polling loops" rule, not an exception to it: the wait is
+bounded to one manual (`workflow_dispatch`) run, never a recurring scheduled job.
+
+**The one honest limitation:** a button click that happens *after* the 20-minute window closes (the
+workflow run has already ended) is not handled by that run -- there is no persistent listener at
+$0/GitHub-Actions-only to catch it later. Every callback received during the window is answered
+(`answerCallbackQuery`, clearing the spinner) even if it is malformed or addressed to a different/
+stale `content_id`, so a user's tap is never left visibly hanging; only a match for the current
+`content_id` ends the wait and is acted on.
+
+**What each decision actually does** (`pipeline.py::_wait_for_approval`):
+- **✅ Approve** -- records `ApprovalState(decision="approve")` to `data/production/approval_state.json`
+  (transient, gitignored, same place as `script.json`) and sends the Telegram confirmation
+  "✅ Approved". This is the clean integration point for a future YouTube publisher (Stage 11): a
+  publisher stage can read this file and act only on `decision == "approve"`, without
+  `telegram_approval.py` knowing anything about YouTube. YouTube publishing itself is not
+  implemented.
+- **🔄 Regenerate** -- acknowledges the callback, sends "🔄 Regeneration started", and calls
+  `telegram_approval.py::trigger_regeneration_workflow()`, which dispatches a **new**
+  `produce_video.yml` run via the GitHub REST API
+  (`POST /repos/{repo}/actions/workflows/produce_video.yml/dispatches`), passing the current
+  `script.topic` as the `topic_override` input so `topic_selection.py` prefers re-selecting the same
+  topic (see "Topic selection" above) -- this is "the same topic/content intent" the task asks for,
+  without a second workflow or new infrastructure. Uses the run's own default `GITHUB_TOKEN`:
+  `workflow_dispatch` is an explicit, documented exception to GitHub's "events triggered by
+  GITHUB_TOKEN do not start new workflow runs" recursion guard, so no separate personal access token
+  is needed -- only `permissions: actions: write` on the workflow (see "GitHub Actions workflow"
+  below). If `GITHUB_TOKEN`/`GITHUB_REPOSITORY` are unavailable (e.g. running locally) or the
+  dispatch call fails, this is reported honestly (a Telegram message explaining regeneration could
+  not be triggered automatically, and the recorded `ApprovalState.detail`) rather than silently
+  claiming success -- see the task's explicit "do not silently fall back to non-functional buttons"
+  rule.
+- **❌ Reject** -- records `ApprovalState(decision="reject")` and sends "❌ Rejected". No
+  regeneration, no publishing.
+- **Timeout** (no decision within the window) -- records `ApprovalState(decision="timeout")`; the
+  video and its buttons remain in the Telegram chat, but this run takes no further action.
 
 ## Secrets
 
@@ -312,19 +424,33 @@ a raw exception string, which for a lower-level transport error can include requ
 "Visuals" above for the two specific URL-based leak risks (Pixabay, Telegram) and how they're
 closed.
 
+Two more environment variables are read only for the "Regenerate" button (see "Telegram approval
+gate" above): `GITHUB_TOKEN` (the workflow's own default per-run token -- not a new secret to
+create) and `GITHUB_REPOSITORY` (set automatically by GitHub Actions on every runner). Neither is
+required locally; regeneration is simply reported as unavailable if they are absent (see that
+section's "do not silently fall back to non-functional buttons" handling), rather than the pipeline
+failing outright.
+
 ## GitHub Actions workflow
 
-`.github/workflows/produce_video.yml` -- manually triggered only (`workflow_dispatch`; no
-`schedule`/`cron`/`repository_dispatch`). Steps: checkout -> Python 3.11 -> install dependencies ->
-ensure ffmpeg AND a text-rendering font are installed (checks first, `apt-get install` only if
-missing -- `info_card.py`'s `drawtext` filter needs a real font *file*: it does not rely on
-fontconfig resolving a font by name, since a broken/missing fontconfig config was observed locally
-on Windows; `fonts-dejavu-core` guarantees one of `info_card.py`'s documented font paths exists on
-the Ubuntu runner) -> run the full
-automated test suite -> preflight (`python -m scripts.production.preflight`, its own step so a
-credential problem fails clearly and immediately) -> `python -m scripts.produce_video` (research
-through Telegram delivery). `permissions: contents: read` -- this workflow never commits or pushes
-(see "Relationship to Research Agent state" above). On failure, `data/production/`, `output/`, and
+`.github/workflows/produce_video.yml` -- manually triggered only (`workflow_dispatch`, with one
+optional `topic_override` input set automatically by a "Regenerate" click, see "Telegram approval
+gate" above; no `schedule`/`cron`/`repository_dispatch`). Steps: checkout -> Python 3.11 -> install
+dependencies -> ensure ffmpeg AND a text-rendering font are installed (checks first, `apt-get
+install` only if missing -- `info_card.py`'s `drawtext` filter needs a real font *file*: it does not
+rely on fontconfig resolving a font by name, since a broken/missing fontconfig config was observed
+locally on Windows; `fonts-dejavu-core` guarantees one of `info_card.py`'s documented font paths
+exists on the Ubuntu runner) -> run the full automated test suite -> preflight (`python -m
+scripts.production.preflight`, its own step so a credential problem fails clearly and immediately)
+-> `python -m scripts.produce_video` (research through the bounded Telegram approval wait).
+`permissions: contents: read` (this workflow never commits or pushes -- see "Relationship to
+Research Agent state" above) plus `permissions: actions: write` (so a "Regenerate" click can
+dispatch a new run of this same workflow -- see "Telegram approval gate" above). `timeout-minutes:
+45` (raised from 30 to comfortably fit the ~20-minute bounded approval wait on top of rendering).
+`GITHUB_TOKEN` is passed into the job's `env` from `secrets.GITHUB_TOKEN` (the default per-run token
+GitHub Actions already provides -- not a new secret to create) purely so `os.getenv("GITHUB_TOKEN")`
+can see it; `GITHUB_REPOSITORY` needs no such wiring, since GitHub Actions sets it as a default
+environment variable on every runner automatically. On failure, `data/production/`, `output/`, and
 `logs/` are uploaded as a short-retention (3 day) diagnostic artifact -- never treated as a
 publishing target, and containing no secrets (none of this pipeline's code ever writes a secret
 value to disk or a log line).
@@ -341,25 +467,39 @@ real MP4?"), the centerpiece test is
 synthetic scenes (`lavfi` color/tone sources, no network, no API keys) through the actual
 `video_assembly.py` + `qa.py` code and asserts QA passes -- this is the one test that most directly
 answers that question, and it needs only ffmpeg (skips gracefully if ffmpeg/ffprobe are not on
-PATH). `tests/production/test_info_card.py` and the below-threshold cases in
+PATH). `tests/production/test_info_card.py` and the info-card-fallback cases in
 `tests/production/test_asset_acquisition.py` follow the same real-ffmpeg-with-graceful-skip pattern,
 since both genuinely render an MP4. `tests/production/test_subtitles.py` covers the chunking/wrapping
 guarantees (max 2 lines, max words/cue, non-overlapping cue timing) and `.ass` output format with no
-ffmpeg dependency (pure Python). `tests/production/test_visual_relevance.py` covers keyword
-extraction, shot-type classification, and scoring behavior (specific-match reward, generic-term
-penalty, aspect bonus, shot-type-repetition penalty) with fake `AssetResult`/`Scene` objects, no
-network. Everything else follows CLAUDE.md's no-public-internet-for-unit-tests rule via mocked HTTP
+ffmpeg dependency (pure Python). `tests/production/test_visual_relevance.py` covers the metadata
+pre-filter (keyword extraction, shot-type classification, specific-match reward, generic-term
+penalty, aspect bonus, shot-type-repetition penalty) and `tests/production/test_vision_validation.py`
+covers the actual relevance decision (prompt content, response parsing, the hard
+domain/threshold/misleading rejection rule, shortlist fall-through on rejection, the real paper-card
+and grocery-shelf failures this fixes, thumbnail-only fetching) -- both with fake `AssetResult`/
+`Scene`/`LlmProvider` objects, no network; `tests/production/test_asset_acquisition.py` exercises the
+same scenarios end to end through `acquire_assets()`. `tests/production/test_telegram_approval.py`
+covers the approval keyboard/callback_data shape, malformed/unrelated-callback handling, the full
+approve/reject/regenerate/timeout decision loop against a fake `TelegramClient`, approval-state
+persistence, and the GitHub workflow-dispatch call (mocked `requests.post`) -- no real Telegram or
+GitHub API calls. `tests/production/test_gemini_provider.py` validates the Vision call's multimodal
+`input` shape (the `user_input`-step wrapper) against the real, installed `google-genai` SDK's own
+request model, the same technique already used there for `generate_script()`'s `response_format`.
+Everything else follows CLAUDE.md's no-public-internet-for-unit-tests rule via mocked HTTP
 (providers) or fake in-memory providers (`script_agent.py`, `asset_acquisition.py`), matching the
-pattern already established in `tests/research/`. Real Gemini/Pexels/Pixabay/edge-tts/Telegram
-connectivity is only exercised for real inside the GitHub Actions workflow itself -- see the
-top-level report for what that means was and wasn't verifiable during development.
+pattern already established in `tests/research/`. Real Gemini (text and Vision)/Pexels/Pixabay/
+edge-tts/Telegram connectivity is only exercised for real inside the GitHub Actions workflow itself
+-- see the top-level report for what that means was and wasn't verifiable during development.
 
 ## Possible next steps (not implemented)
 
-- Telegram Approve/Regenerate/Reject buttons (needs webhook/callback infrastructure).
+- A persistent webhook receiver, if approval decisions after the ~20-minute window ever prove to
+  matter in practice -- would need a new always-on hosting service outside the current $0/GitHub
+  Actions architecture (see "Telegram approval gate" above), so needs explicit revisiting first.
+- YouTube publishing, reading `approval_state.json` for `decision == "approve"`.
 - Feeding the produced video's topic back into Research Agent's persistent state.
 - Background music (needs a clearly copyright-safe source and mixing logic).
 - Scheduling the production workflow once a manual run has been proven reliable.
-- YouTube publishing, analytics, affiliate automation.
+- Analytics, affiliate automation.
 
 Deciding and implementing any of the above is a separate, explicitly scoped task.

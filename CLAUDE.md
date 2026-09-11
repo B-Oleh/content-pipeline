@@ -109,7 +109,11 @@ The single place for cloud/CI rules — do not restate these elsewhere.
 - Any credential a GitHub Actions workflow needs is stored in GitHub Secrets, never committed
   (see "Environment variables and secret handling"). `produce_video.yml` needs
   `GEMINI_API_KEY`, `PEXELS_API_KEY`, `PIXABAY_API_KEY`, `TELEGRAM_BOT_TOKEN`, and
-  `TELEGRAM_CHAT_ID`; `research_agent.yml` needs none.
+  `TELEGRAM_CHAT_ID`; `research_agent.yml` needs none. `produce_video.yml` also declares
+  `permissions: actions: write` (in addition to `contents: read`) so a Telegram "Regenerate" click
+  can dispatch a new run of the same workflow via the GitHub REST API, using the default
+  `GITHUB_TOKEN` GitHub Actions already provides to every run — not a new secret to create (see
+  docs/PRODUCTION_PIPELINE.md "Telegram approval gate").
 - No paid service may be enabled in CI or anywhere else without explicit user approval (see "API
   integrations") — the $0 budget is the default, not a target to negotiate down from.
 - Do not add scheduling or large-scale automation until the MVP is stable (see "Current
@@ -142,17 +146,24 @@ The core pipeline, in order:
 12. Analytics
 13. Learning feedback loop
 
-Stage 1 has a full implementation (see docs/RESEARCH_AGENT.md). Stages 4-9, plus the video-delivery
-half of stage 10 (sending the rendered MP4 — not yet the Approve/Regenerate/Reject buttons), have a
-first working implementation under `scripts/production/` (see docs/PRODUCTION_PIPELINE.md); Visual
-Planner's shot-list responsibility is folded into Script Agent's structured Gemini output rather
-than a separate stage/module, since one LLM call producing both narration and per-scene visual
-queries avoids a redundant second call. Stages 2-3 (Opportunity Scoring, Fact Checking) as
-standalone stages are not implemented as separate modules — Opportunity Scoring is Research
-Agent's existing ranking (see docs/RESEARCH_AGENT.md "Ranking formula"), and Fact Checking is
+Stage 1 has a full implementation (see docs/RESEARCH_AGENT.md). Stages 4-9, plus stage 10 in full
+(sending the rendered MP4 with real Approve/Regenerate/Reject buttons and actually handling a click
+on one of them — see "Telegram approval gate" below for the exact mechanism and its one honest
+limitation), have a working implementation under `scripts/production/` (see
+docs/PRODUCTION_PIPELINE.md). Visual Planner's shot-list responsibility is folded into Script
+Agent's structured Gemini output rather than a separate stage/module, since one LLM call producing
+both narration and per-scene visual queries avoids a redundant second call; Asset Acquisition (stage
+6) uses a cheap metadata pre-filter (`visual_relevance.py`) only to shortlist candidates, then Gemini
+Vision (`vision_validation.py`) makes the actual relevance/domain decision by looking at each
+shortlisted candidate's thumbnail — metadata/keyword scoring alone proved semantically unreliable in
+real output (see docs/PRODUCTION_PIPELINE.md "Visual relevance"). Stages 2-3 (Opportunity Scoring,
+Fact Checking) as standalone stages are not implemented as separate modules — Opportunity Scoring is
+Research Agent's existing ranking (see docs/RESEARCH_AGENT.md "Ranking formula"), and Fact Checking is
 currently only the automated fabrication-claim guard inside Script Agent (see
 docs/PRODUCTION_PIPELINE.md "Gemini (Script Agent)"), not a fully independent verification stage.
-Stages 11-13 are not implemented.
+Stage 11 (Publishing) is not implemented — an Approve decision is recorded as a clean integration
+point for it (see "Telegram approval gate" below), nothing publishes automatically yet. Stages 12-13
+are not implemented.
 
 ### Research and opportunity scoring rules
 
@@ -252,13 +263,21 @@ Publishing stage, the bot must eventually present:
 - the relevant opportunity/scoring information
 
 with three actions: ✅ Approve, 🔄 Regenerate, ❌ Reject. Public publishing must never happen
-before an explicit Approve. Telegram notifications must follow the event-driven rule in "Cloud
-execution and budget" (no polling from GitHub Actions). Sending the rendered video with a caption
-(topic, title, content role, selection reasoning, research score) is implemented (see
-docs/PRODUCTION_PIPELINE.md "Telegram delivery"); the Approve/Regenerate/Reject buttons and any
-webhook/callback handling are not — nothing currently gates on them, so there is no publishing
-stage yet for them to gate. "Current development stage" and "Human approval required" below apply
-until that gate exists: nothing downstream of Telegram delivery publishes anywhere automatically.
+before an explicit Approve. Sending the rendered video with real inline Approve/Regenerate/Reject
+buttons and a caption (topic, title, content role, selection reasoning, research score) is
+implemented (see docs/PRODUCTION_PIPELINE.md "Telegram delivery"), and a click on one of them is
+genuinely handled — not just displayed — by `telegram_approval.py` (see
+docs/PRODUCTION_PIPELINE.md "Telegram approval gate" for the full mechanism). One documented,
+deliberate limitation: GitHub Actions has no persistent webhook receiver, so callback handling is a
+bounded (~20 minute) long-poll wait inside the same `produce_video.yml` run right after delivery,
+not an always-on listener — this is the "favor event-driven ... over polling loops" rule's
+practical limit at $0/GitHub-Actions-only, not an exception to it (the poll is bounded to one manual
+run, not a recurring scheduled job, and each request blocks server-side rather than busy-looping).
+A click after that window closes is not handled by that run. Regenerate re-dispatches
+`produce_video.yml` for the same topic via the GitHub REST API; Approve/Reject only record decision
+state today (`data/production/approval_state.json`, transient) as a clean integration point for
+Stage 11 (Publishing) once it exists — nothing publishes automatically yet. "Current development
+stage" and "Human approval required" below still apply until Publishing exists.
 
 ### Analytics and learning feedback loop
 

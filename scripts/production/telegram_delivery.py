@@ -1,9 +1,11 @@
-"""Telegram delivery: sends the rendered MP4 with a research-grounded caption.
+"""Telegram delivery: sends the rendered MP4, with real Approve/Regenerate/
+Reject inline buttons, and a research-grounded caption.
 
-See CLAUDE.md pipeline stage 10 ("Telegram approval gate") and the task's
-explicit scope for this milestone: no Approve/Regenerate/Reject buttons yet
--- only proving the real video reaches Telegram. QA must have passed before
-this is ever called (see pipeline.py); this module does not re-check QA.
+See CLAUDE.md pipeline stage 10 ("Telegram approval gate") and
+docs/PRODUCTION_PIPELINE.md "Telegram approval gate" for how
+telegram_approval.py then actually handles a click on one of these
+buttons. QA must have passed before this is ever called (see pipeline.py);
+this module does not re-check QA.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ from pathlib import Path
 
 from scripts.production.models import VideoScript
 from scripts.production.providers.telegram_client import TelegramClient
+from scripts.production.telegram_approval import build_approval_keyboard
 from scripts.research.models import SCORE_DIMENSIONS, ScoredCandidate
 from scripts.utils.logging_utils import get_logger
 
@@ -42,8 +45,19 @@ def build_caption(script: VideoScript, scored_candidate: ScoredCandidate) -> str
 
 
 def deliver_video(video_path: Path, script: VideoScript, scored_candidate: ScoredCandidate, client: TelegramClient) -> dict:
+    """Sends the video with its caption and Approve/Regenerate/Reject
+    buttons. The buttons' callback_data carries `script.candidate_id` as
+    the stable content ID (see models.py: populated from
+    ResearchCandidate.candidate_id, which is required/non-empty) -- this is
+    the same ID pipeline.py later polls for in telegram_approval.py, so a
+    decision can always be mapped back to the exact generated video.
+    """
+    if not script.candidate_id:
+        raise ValueError("VideoScript.candidate_id must be set before Telegram delivery (needed for approval callback_data)")
+
     caption = build_caption(script, scored_candidate)
-    logger.info("Sending %s to Telegram", video_path)
-    result = client.send_video(video_path, caption)
+    keyboard = build_approval_keyboard(script.candidate_id)
+    logger.info("Sending %s to Telegram (content_id=%s)", video_path, script.candidate_id)
+    result = client.send_video(video_path, caption, reply_markup=keyboard)
     logger.info("Telegram delivery succeeded (message_id=%s)", result.get("message_id"))
     return result

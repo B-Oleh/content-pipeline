@@ -50,6 +50,12 @@ class AssetResult:
     is_video: bool
     duration_seconds: Optional[float]
     attribution: str  # e.g. "Video by Jane Doe on Pexels"
+    # A small static preview image URL, when the provider's search response
+    # includes one -- used by vision_validation.py to fetch a cheap
+    # thumbnail for Gemini Vision evaluation instead of the full video/photo
+    # file (see that module's docstring and the task's explicit "download or
+    # use small thumbnails/previews only for evaluation" requirement).
+    thumbnail_url: Optional[str] = None
 
 
 class VisualAssetProvider(ABC):
@@ -118,6 +124,7 @@ class PexelsProvider(VisualAssetProvider):
                     is_video=True,
                     duration_seconds=video.get("duration"),
                     attribution=f"Video by {photographer} on Pexels",
+                    thumbnail_url=video.get("image"),
                 )
             )
         return results
@@ -148,6 +155,7 @@ class PexelsProvider(VisualAssetProvider):
                     is_video=False,
                     duration_seconds=None,
                     attribution=f"Photo by {photographer} on Pexels",
+                    thumbnail_url=src.get("small") or src.get("medium") or download_url,
                 )
             )
         return results
@@ -187,6 +195,7 @@ class PixabayProvider(VisualAssetProvider):
                     is_video=True,
                     duration_seconds=hit.get("duration"),
                     attribution=f"Video by {user} on Pixabay",
+                    thumbnail_url=preferred.get("thumbnail"),
                 )
             )
         return results
@@ -215,6 +224,7 @@ class PixabayProvider(VisualAssetProvider):
                     is_video=False,
                     duration_seconds=None,
                     attribution=f"Photo by {user} on Pixabay",
+                    thumbnail_url=hit.get("previewURL"),
                 )
             )
         return results

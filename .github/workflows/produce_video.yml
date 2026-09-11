@@ -1,22 +1,37 @@
 # Manually triggered end-to-end video production run: Research -> Script
-# (Gemini) -> Assets (Pexels/Pixabay) -> Voice (edge-tts) -> Subtitles ->
-# Render (ffmpeg) -> QA -> Telegram delivery. See
+# (Gemini) -> Assets (Pexels/Pixabay, Gemini Vision-validated) -> Voice
+# (edge-tts) -> Subtitles -> Render (ffmpeg) -> QA -> Telegram delivery ->
+# bounded wait for an Approve/Regenerate/Reject decision. See
 # docs/PRODUCTION_PIPELINE.md for the full design.
 #
 # workflow_dispatch ONLY -- no schedule/cron/repository_dispatch (see
 # CLAUDE.md "Cloud execution and budget"). This proves the full pipeline
-# produces one real MP4 delivered to Telegram; it does not automate
-# publishing or scheduling.
+# produces one real MP4 delivered to Telegram with real Approve/Regenerate/
+# Reject buttons; it does not automate publishing or scheduling.
 name: Produce Video (manual)
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      topic_override:
+        description: >
+          Internal: set automatically when this run was started by a
+          Telegram "Regenerate" click (see telegram_approval.py). Leave
+          blank for a normal manual run.
+        required: false
+        default: ""
 
 # This workflow never writes to the repository (no state/ changes, no
 # committed video -- see "Do not commit generated video to Git" in
-# docs/PRODUCTION_PIPELINE.md), so it only needs read access.
+# docs/PRODUCTION_PIPELINE.md), so it only needs read access, plus
+# `actions: write` so a Telegram "Regenerate" click can dispatch a new run
+# of this same workflow via the GitHub REST API (see
+# telegram_approval.py::trigger_regeneration_workflow -- workflow_dispatch
+# is an explicit exception to GITHUB_TOKEN's usual "does not trigger new
+# runs" recursion guard, so no extra personal access token is needed).
 permissions:
   contents: read
+  actions: write
 
 # Simplest reasonable protection against two production runs racing for the
 # same Telegram chat / API quota at once -- see CLAUDE.md-style concurrency
@@ -29,16 +44,24 @@ concurrency:
 jobs:
   produce:
     runs-on: ubuntu-latest
-    # A full render (network downloads + TTS + ffmpeg encode) can run
-    # longer than the default 6h is irrelevant, but a stuck/hanging step
-    # (e.g. an API call with no timeout) should not burn the whole budget.
-    timeout-minutes: 30
+    # A full render (network downloads + TTS + ffmpeg encode) plus a bounded
+    # ~20-minute wait for a Telegram approval decision (see
+    # telegram_approval.py's DEFAULT_POLL_TIMEOUT_SECONDS) needs more than
+    # the previous 30 minutes; a stuck/hanging step should still not burn
+    # the whole budget.
+    timeout-minutes: 45
     env:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
       PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      # Used only by the "Regenerate" button's workflow-dispatch call (see
+      # telegram_approval.py::trigger_regeneration_workflow) -- this is the
+      # default per-run token GitHub Actions provides automatically, not a
+      # secret to create.
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TOPIC_OVERRIDE: ${{ github.event.inputs.topic_override }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -75,7 +98,7 @@ jobs:
       - name: Preflight -- verify secrets and service connectivity
         run: python -m scripts.production.preflight
 
-      - name: Run video production pipeline (research -> script -> assets -> voice -> subtitles -> render -> QA -> Telegram)
+      - name: Run video production pipeline (research -> script -> assets -> voice -> subtitles -> render -> QA -> Telegram -> approval wait)
         run: python -m scripts.produce_video
 
       - name: Upload diagnostics on failure

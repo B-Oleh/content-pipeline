@@ -8,6 +8,8 @@ research itself.
 
 from __future__ import annotations
 
+from typing import Optional
+
 from scripts.research.models import ContentPillar, ResearchResult, ScoredCandidate
 from scripts.utils.logging_utils import get_logger
 
@@ -33,16 +35,38 @@ class NoSuitableCandidateError(RuntimeError):
     """Raised when a Research Agent run produced no candidates at all."""
 
 
-def select_topic_candidate(result: ResearchResult) -> ScoredCandidate:
+def select_topic_candidate(result: ResearchResult, preferred_title: Optional[str] = None) -> ScoredCandidate:
     """Pick the candidate to produce a video for.
 
-    Prefers the pillar most reliably illustrated with generic stock footage
-    among the top-ranked candidates; falls back to the single best-ranked
-    candidate overall (with a warning) if none of the reliably-illustrated
-    pillars are present, rather than failing the run outright.
+    If `preferred_title` is given (set by the "Regenerate" Telegram button
+    -- see telegram_approval.py::trigger_regeneration_workflow and
+    produce_video.py) and a candidate with that exact title is present in
+    this run's fresh Research Agent results, it is selected directly --
+    this is what "regenerate the same topic/content intent" means in
+    practice, since Research Agent re-runs from scratch each time and does
+    not guarantee an identical candidate set. If the title is not found
+    (the topic may no longer be current), falls back to normal selection
+    below with a logged warning rather than failing the run.
+
+    Otherwise, prefers the pillar most reliably illustrated with generic
+    stock footage among the top-ranked candidates; falls back to the single
+    best-ranked candidate overall (with a warning) if none of the
+    reliably-illustrated pillars are present, rather than failing the run
+    outright.
     """
     if not result.candidates:
         raise NoSuitableCandidateError("Research Agent produced no candidates to select a topic from")
+
+    if preferred_title:
+        for scored in result.candidates:
+            if scored.candidate.title == preferred_title:
+                logger.info("Regeneration requested %r -- found and re-selected the same topic", preferred_title)
+                return scored
+        logger.warning(
+            "Regeneration requested topic %r, but it is no longer present in this run's Research Agent "
+            "results -- falling back to normal topic selection",
+            preferred_title,
+        )
 
     def sort_key(scored: ScoredCandidate) -> tuple[int, float]:
         reliability = PILLAR_VISUAL_RELIABILITY.get(scored.candidate.content_pillar, 0)

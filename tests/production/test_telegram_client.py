@@ -85,3 +85,42 @@ def test_send_video_failure_never_leaks_token(monkeypatch, tmp_path):
         raise AssertionError("expected TelegramError")
     except TelegramError as exc:
         assert SECRET_TOKEN not in str(exc)
+
+
+def test_get_updates_failure_never_leaks_token(monkeypatch):
+    def fake_get(url, params=None, timeout=None):
+        raise requests.exceptions.ConnectionError(f"Failed to connect to {url}")
+
+    monkeypatch.setattr("scripts.production.providers.telegram_client.requests.get", fake_get)
+
+    try:
+        TelegramClient(SECRET_TOKEN, "12345").get_updates()
+        raise AssertionError("expected TelegramError")
+    except TelegramError as exc:
+        assert SECRET_TOKEN not in str(exc)
+
+
+def test_answer_callback_query_failure_never_leaks_token(monkeypatch):
+    def fake_post(url, data=None, timeout=None):
+        raise requests.exceptions.Timeout(f"Timed out calling {url}")
+
+    monkeypatch.setattr("scripts.production.providers.telegram_client.requests.post", fake_post)
+
+    try:
+        TelegramClient(SECRET_TOKEN, "12345").answer_callback_query("cb1")
+        raise AssertionError("expected TelegramError")
+    except TelegramError as exc:
+        assert SECRET_TOKEN not in str(exc)
+
+
+def test_send_message_failure_never_leaks_token(monkeypatch):
+    def fake_post(url, data=None, timeout=None):
+        raise requests.exceptions.Timeout(f"Timed out calling {url}")
+
+    monkeypatch.setattr("scripts.production.providers.telegram_client.requests.post", fake_post)
+
+    try:
+        TelegramClient(SECRET_TOKEN, "12345").send_message("hello")
+        raise AssertionError("expected TelegramError")
+    except TelegramError as exc:
+        assert SECRET_TOKEN not in str(exc)

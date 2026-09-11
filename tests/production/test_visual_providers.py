@@ -33,6 +33,7 @@ def test_pexels_search_videos_parses_response(monkeypatch):
                         "url": "https://www.pexels.com/video/1",
                         "duration": 12,
                         "user": {"name": "Jane"},
+                        "image": "https://images.pexels.com/videos/1/preview.jpg",
                         "video_files": [
                             {"file_type": "video/mp4", "width": 640, "height": 1136, "link": "https://cdn/small.mp4"},
                             {"file_type": "video/mp4", "width": 1080, "height": 1920, "link": "https://cdn/large.mp4"},
@@ -51,6 +52,7 @@ def test_pexels_search_videos_parses_response(monkeypatch):
     assert results[0].is_video is True
     assert results[0].download_url == "https://cdn/large.mp4"
     assert "Jane" in results[0].attribution
+    assert results[0].thumbnail_url == "https://images.pexels.com/videos/1/preview.jpg"
 
 
 def test_pexels_search_videos_skips_entries_without_mp4(monkeypatch):
@@ -66,7 +68,17 @@ def test_pexels_search_photos_fallback_parses_response(monkeypatch):
     def fake_get(url, headers=None, params=None, timeout=None):
         return _FakeResponse(
             200,
-            {"photos": [{"url": "https://pexels.com/photo/1", "width": 1080, "height": 1920, "photographer": "Bob", "src": {"large2x": "https://cdn/photo.jpg"}}]},
+            {
+                "photos": [
+                    {
+                        "url": "https://pexels.com/photo/1",
+                        "width": 1080,
+                        "height": 1920,
+                        "photographer": "Bob",
+                        "src": {"large2x": "https://cdn/photo.jpg", "small": "https://cdn/photo-small.jpg"},
+                    }
+                ]
+            },
         )
 
     monkeypatch.setattr("scripts.production.providers.visual.requests.get", fake_get)
@@ -74,6 +86,7 @@ def test_pexels_search_photos_fallback_parses_response(monkeypatch):
     assert len(results) == 1
     assert results[0].is_video is False
     assert results[0].download_url == "https://cdn/photo.jpg"
+    assert results[0].thumbnail_url == "https://cdn/photo-small.jpg"
 
 
 def test_pixabay_search_videos_parses_response(monkeypatch):
@@ -87,7 +100,9 @@ def test_pixabay_search_videos_parses_response(monkeypatch):
                         "pageURL": "https://pixabay.com/videos/1",
                         "duration": 10,
                         "user": "Alice",
-                        "videos": {"medium": {"url": "https://cdn/medium.mp4", "width": 960, "height": 1706}},
+                        "videos": {
+                            "medium": {"url": "https://cdn/medium.mp4", "width": 960, "height": 1706, "thumbnail": "https://cdn/medium-thumb.jpg"}
+                        },
                     }
                 ]
             },
@@ -98,6 +113,34 @@ def test_pixabay_search_videos_parses_response(monkeypatch):
     assert len(results) == 1
     assert results[0].provider == "pixabay"
     assert results[0].download_url == "https://cdn/medium.mp4"
+    assert results[0].thumbnail_url == "https://cdn/medium-thumb.jpg"
+
+
+def test_pixabay_search_photos_parses_response(monkeypatch):
+    def fake_get(url, params=None, timeout=None):
+        assert params["key"] == SECRET_PIXABAY_KEY
+        return _FakeResponse(
+            200,
+            {
+                "hits": [
+                    {
+                        "pageURL": "https://pixabay.com/photos/1",
+                        "user": "Alice",
+                        "largeImageURL": "https://cdn/large.jpg",
+                        "previewURL": "https://cdn/preview-150.jpg",
+                        "imageWidth": 1080,
+                        "imageHeight": 1920,
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr("scripts.production.providers.visual.requests.get", fake_get)
+    results = PixabayProvider(SECRET_PIXABAY_KEY).search_photos("gaming pc")
+    assert len(results) == 1
+    assert results[0].is_video is False
+    assert results[0].download_url == "https://cdn/large.jpg"
+    assert results[0].thumbnail_url == "https://cdn/preview-150.jpg"
 
 
 def test_pixabay_error_response_never_leaks_api_key_in_exception(monkeypatch):

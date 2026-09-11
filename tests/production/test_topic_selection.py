@@ -67,3 +67,24 @@ def test_falls_back_to_best_overall_when_nothing_reliable(caplog):
 
     assert chosen.candidate.candidate_id == "a"
     assert any("low visual reliability" in record.message for record in caplog.records)
+
+
+def test_preferred_title_is_selected_when_present():
+    """Used by the Telegram "Regenerate" button (see telegram_approval.py)
+    to re-select the same topic in a fresh Research Agent run."""
+    low_ranked = _scored("a", ContentPillar.OPTIMIZATION, overall_score=3.0, rank=2)
+    preferred = _scored("b", ContentPillar.GAME_RECOMMENDATIONS, overall_score=2.0, rank=3)
+
+    chosen = select_topic_candidate(_result([low_ranked, preferred]), preferred_title="Topic b")
+
+    assert chosen.candidate.candidate_id == "b"
+
+
+def test_preferred_title_falls_back_to_normal_selection_when_not_found(caplog):
+    only = _scored("a", ContentPillar.OPTIMIZATION, overall_score=5.0, rank=1)
+
+    with caplog.at_level("WARNING"):
+        chosen = select_topic_candidate(_result([only]), preferred_title="A topic that no longer exists")
+
+    assert chosen.candidate.candidate_id == "a"
+    assert any("no longer present" in record.message for record in caplog.records)

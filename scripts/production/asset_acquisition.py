@@ -3,12 +3,18 @@ for every scene.
 
 See CLAUDE.md pipeline stage 6. For each scene, queries every one of its
 visual_search_queries against BOTH Pexels and Pixabay (video search first,
-photo search as a fallback) -- not stopping at the first hit -- scores every
-candidate found with visual_relevance.py (metadata-only; see that module's
-docstring for why), and either downloads the best-scoring candidate or, if
-nothing scores at or above RELEVANCE_THRESHOLD, renders a designed
-information card instead of misleading generic footage (see info_card.py
-and the task's explicit "never imply generic stock footage is footage of a
+photo search as a fallback) -- not stopping at the first hit. Every
+candidate is first scored by visual_relevance.py (cheap, metadata-only --
+keyword/URL overlap, aspect ratio, shot-type variety) purely to build a
+short, affordable shortlist; that metadata score is NOT the final relevance
+decision (see visual_relevance.py's docstring update: it proved
+semantically wrong on its own, e.g. matching a paper greeting card to a
+"graphics card" scene on the shared word "card"). The shortlist is then
+sent to vision_validation.py, which uses Gemini Vision to actually look at
+each candidate's thumbnail and makes the real accept/reject call. If
+nothing survives Vision validation, a designed information card is
+rendered instead of misleading generic footage (see info_card.py and the
+task's explicit "never imply generic stock footage is footage of a
 specific named game, GPU, laptop, or product" requirement).
 """
 
@@ -19,13 +25,13 @@ from typing import Optional
 
 from scripts.production.info_card import InfoCardError, render_info_card
 from scripts.production.models import Scene
+from scripts.production.providers.llm import LlmProvider
 from scripts.production.providers.visual import AssetResult, VisualAssetProvider
+from scripts.production.vision_validation import SHORTLIST_SIZE, select_vision_validated_candidate
 from scripts.production.visual_relevance import (
     INFO_CARD_SHOT_TYPE,
-    RELEVANCE_THRESHOLD,
     ScoredCandidate,
     score_candidate,
-    select_best_candidate,
 )
 from scripts.utils.logging_utils import get_logger
 
@@ -70,14 +76,14 @@ def _score_all(
     return [score_candidate(asset, scene, query, previous_shot_type) for asset, query in candidates]
 
 
-def _select_asset(
+def _shortlist_candidates(
     scene: Scene, providers: list[VisualAssetProvider], previous_shot_type: Optional[str]
-) -> Optional[ScoredCandidate]:
+) -> list[ScoredCandidate]:
     """Gathers candidates from every query against both providers (video
-    first, photo fallback), scores them, and returns the best one -- or
-    None if nothing was found at all. A below-threshold-but-found
-    candidate is still returned (callers use it as an info-card backdrop
-    rather than discarding it)."""
+    first, photo fallback), scores them with the cheap metadata-only
+    signal, and returns the top SHORTLIST_SIZE, best-first -- this is only
+    a pre-filter to bound how many candidates get a real Vision call (see
+    module docstring); it is NOT the final relevance decision."""
     video_candidates = _collect_candidates(scene, providers, "search_videos")
     scored = _score_all(video_candidates, scene, previous_shot_type)
 
@@ -85,7 +91,8 @@ def _select_asset(
         photo_candidates = _collect_candidates(scene, providers, "search_photos")
         scored = _score_all(photo_candidates, scene, previous_shot_type)
 
-    return select_best_candidate(scored)
+    scored.sort(key=lambda candidate: candidate.score, reverse=True)
+    return scored[:SHORTLIST_SIZE]
 
 
 def _download_best_candidate(
@@ -103,38 +110,26 @@ def _download_best_candidate(
     scene.asset_attribution = f"{best.asset.attribution} (relevance {best.score:.2f}: {best.reason})"
 
 
-def _use_info_card(
-    scene: Scene, best: Optional[ScoredCandidate], providers: list[VisualAssetProvider], assets_dir: Path
-) -> None:
-    """Renders a designed information card instead of a weak/missing match.
+def _use_info_card(scene: Scene, had_candidates: bool, dest_path: Path) -> None:
+    """Renders a designed information card with a plain flat/gradient
+    background -- NEVER a rejected or otherwise unvalidated candidate's
+    asset.
 
-    If a below-threshold candidate exists, it is downloaded and used as a
-    darkened backdrop (real, at-least-topically-adjacent visual context)
-    rather than wasted -- see the task's example spec ("contextual
-    background asset").
+    A candidate Gemini Vision rejected (out of domain, misleading, or
+    below the relevance threshold) must never appear anywhere in the
+    rendered video -- not as scene footage, not as a photo, and not as an
+    information-card background, blurred/darkened or otherwise (see the
+    task's explicit correction: a grocery shelf rejected for a PC discount
+    scene must never appear anywhere in that scene). There is therefore no
+    backdrop download here at all; `render_info_card()`'s own
+    `background_path=None` default renders its plain designed background
+    (see info_card.py).
     """
-    background_path = None
-    background_is_video = False
-    if best is not None:
-        try:
-            extension = "mp4" if best.asset.is_video else "jpg"
-            backdrop_path = assets_dir / f"scene_{scene.index:02d}_backdrop.{extension}"
-            provider = next(p for p in providers if p.name == best.asset.provider)
-            provider.download(best.asset, backdrop_path)
-            background_path = backdrop_path
-            background_is_video = best.asset.is_video
-        except Exception as exc:  # noqa: BLE001 -- a failed backdrop download must not block the info card itself
-            logger.warning("Could not download backdrop for scene %d info card: %s", scene.index, exc)
-            background_path = None
-
     headline = scene.on_screen_text or scene.narration_line.split(".")[0]
     key_fact = scene.narration_line if scene.on_screen_text else ""
-    dest_path = assets_dir / f"scene_{scene.index:02d}.mp4"
 
     try:
-        render_info_card(
-            headline, key_fact, dest_path, background_path=background_path, background_is_video=background_is_video
-        )
+        render_info_card(headline, key_fact, dest_path)
     except InfoCardError as exc:
         raise AssetAcquisitionError(f"Could not render information card for scene {scene.index}: {exc}") from exc
 
@@ -142,39 +137,41 @@ def _use_info_card(
     scene.asset_is_video = True
     scene.asset_source = "info_card"
     scene.asset_url = None
-    reason = (
-        "no candidate met the relevance threshold"
-        if best is None
-        else f"best candidate scored {best.score:.2f} (below threshold {RELEVANCE_THRESHOLD})"
-    )
+    reason = "no candidate was found at all" if not had_candidates else "no shortlisted candidate passed Gemini Vision's relevance/domain check"
     scene.asset_attribution = f"Generated information card ({reason})"
 
 
-def acquire_assets(scenes: list[Scene], providers: list[VisualAssetProvider], workdir: Path) -> None:
-    """Find (or synthesize) and set one asset per scene, mutating each Scene in place."""
+def acquire_assets(
+    scenes: list[Scene], providers: list[VisualAssetProvider], workdir: Path, llm_provider: LlmProvider
+) -> None:
+    """Find (or synthesize) and set one asset per scene, mutating each Scene
+    in place. `llm_provider` makes the final Vision-based relevance call
+    over each scene's cheap metadata shortlist (see module docstring)."""
     assets_dir = Path(workdir) / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
 
     previous_shot_type: Optional[str] = None
     for scene in scenes:
-        best = _select_asset(scene, providers, previous_shot_type)
+        shortlist = _shortlist_candidates(scene, providers, previous_shot_type)
+        approved = select_vision_validated_candidate(llm_provider, shortlist, scene) if shortlist else None
 
-        if best is not None and best.score >= RELEVANCE_THRESHOLD:
-            _download_best_candidate(scene, best, providers, assets_dir)
-            previous_shot_type = best.shot_type
+        if approved is not None:
+            _download_best_candidate(scene, approved, providers, assets_dir)
+            previous_shot_type = approved.shot_type
             logger.info(
-                "Scene %d: acquired %s from %s (score=%.2f, shot_type=%s)",
+                "Scene %d: acquired %s from %s (metadata_score=%.2f, shot_type=%s, Vision-approved)",
                 scene.index,
-                "video" if best.asset.is_video else "photo",
-                best.asset.provider,
-                best.score,
-                best.shot_type,
+                "video" if approved.asset.is_video else "photo",
+                approved.asset.provider,
+                approved.score,
+                approved.shot_type,
             )
         else:
-            _use_info_card(scene, best, providers, assets_dir)
+            dest_path = assets_dir / f"scene_{scene.index:02d}.mp4"
+            _use_info_card(scene, had_candidates=bool(shortlist), dest_path=dest_path)
             previous_shot_type = INFO_CARD_SHOT_TYPE
             logger.info(
-                "Scene %d: no sufficiently relevant asset found (best score=%s) -- used an information card instead",
+                "Scene %d: no Vision-approved asset found (%d candidate(s) shortlisted) -- used an information card instead",
                 scene.index,
-                f"{best.score:.2f}" if best is not None else "n/a",
+                len(shortlist),
             )

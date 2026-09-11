@@ -21,6 +21,7 @@ from scripts.production.providers.llm import (
     GeminiPingError,
     GeminiProvider,
     ScriptGenerationError,
+    VisionEvaluationError,
 )
 
 
@@ -154,6 +155,64 @@ def test_generate_script_returns_output_text_on_success():
     result = provider.generate_script("prompt")
 
     assert result == '{"title": "Hello"}'
+
+
+def test_evaluate_visual_candidate_sends_multimodal_input_and_returns_output_text():
+    interactions = _FakeInteractions(output_text='{"computer_domain": true}')
+    provider = _provider(interactions)
+
+    result = provider.evaluate_visual_candidate(b"\xff\xd8fakejpeg", "image/jpeg", "Evaluate this image.")
+
+    assert result == '{"computer_domain": true}'
+    call = interactions.calls[0]
+    assert call["model"] == DEFAULT_GEMINI_MODEL
+    assert call["response_format"]["type"] == "text"
+    assert "schema" in call["response_format"]
+    step = call["input"][0]
+    assert step["type"] == "user_input"
+    assert step["content"][0] == {"type": "text", "text": "Evaluate this image."}
+    assert step["content"][1]["type"] == "image"
+    assert step["content"][1]["mime_type"] == "image/jpeg"
+    # base64-encoded, not raw bytes, on the wire.
+    import base64
+
+    assert step["content"][1]["data"] == base64.b64encode(b"\xff\xd8fakejpeg").decode("ascii")
+
+
+def test_evaluate_visual_candidate_request_validates_against_the_real_sdk_request_model():
+    """Same real-SDK validation approach as
+    test_generate_script_response_format_validates_against_the_real_sdk_request_model
+    -- proves the multimodal `input` shape (a `user_input` step wrapping
+    text+image Content blocks) is genuinely accepted and typed by the
+    installed google-genai SDK, not just by a permissive fake client. A
+    bare list of content dicts (without the `user_input` step wrapper) is
+    silently misparsed as unrecognized "steps" by this SDK version -- this
+    guards against that regression.
+    """
+    from google.genai.interactions import CreateModelInteraction
+    from google.genai._gaos.types.interactions.userinputstep import UserInputStep
+    from google.genai._gaos.types.interactions.textcontent import TextContent
+    from google.genai._gaos.types.interactions.imagecontent import ImageContent
+
+    interactions = _FakeInteractions(output_text='{"computer_domain": true}')
+    provider = _provider(interactions)
+
+    provider.evaluate_visual_candidate(b"\xff\xd8fakejpeg", "image/jpeg", "Evaluate this image.")
+
+    call = interactions.calls[0]
+    validated = CreateModelInteraction.model_validate(call)
+
+    assert isinstance(validated.input[0], UserInputStep)
+    assert isinstance(validated.input[0].content[0], TextContent)
+    assert isinstance(validated.input[0].content[1], ImageContent)
+
+
+def test_evaluate_visual_candidate_raises_vision_evaluation_error_on_empty_response():
+    interactions = _FakeInteractions(output_text=None, status="failed")
+    provider = _provider(interactions)
+
+    with pytest.raises(VisionEvaluationError):
+        provider.evaluate_visual_candidate(b"bytes", "image/jpeg", "prompt")
 
 
 def test_ping_and_generate_script_errors_are_distinct_types():

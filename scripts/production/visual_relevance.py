@@ -1,17 +1,21 @@
-"""Deterministic, metadata-only relevance scoring for candidate visual
-assets (see task: "Improve scene-to-asset matching without adding new paid
-APIs").
+"""Deterministic, metadata-only relevance PRE-FILTER for candidate visual
+assets.
 
 Scores each Pexels/Pixabay search result using only data already returned
 by the search call itself (search query, the result's own page URL,
-width/height) -- no image download, no vision-model call. This is the
-"deterministic metadata/query scoring fallback" the task explicitly allows
-in place of Gemini vision (real image download + a vision call adds real
-complexity and, in this environment, cannot be verified against a live
-API -- see docs/PRODUCTION_PIPELINE.md "Visual relevance"). It is
-structured so a future vision-based scorer could be added as an additional
-signal without changing asset_acquisition.py's calling contract: nothing
-downstream cares how a ScoredCandidate's score was computed.
+width/height) -- no image download, no vision-model call. This score is
+cheap (no API cost) but semantically shallow: real production output
+showed it matching a paper greeting card to a "graphics card" scene (both
+share the word "card") and a grocery-store shelf to a "discount" scene
+(shared generic sale-adjacent keywords) -- keyword/URL overlap has no
+notion of what is actually depicted in the image. It is therefore used
+ONLY to build a short, affordable shortlist of candidates (see
+asset_acquisition.py::SHORTLIST_SIZE via vision_validation.py); the final
+accept/reject decision is made by Gemini Vision actually looking at each
+shortlisted candidate's thumbnail (see vision_validation.py). Nothing here
+was removed -- score_candidate()/select_best_candidate() are still exactly
+as useful as a first-pass ranking signal, they are simply no longer the
+last word on relevance.
 """
 
 from __future__ import annotations
