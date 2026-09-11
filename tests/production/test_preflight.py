@@ -109,6 +109,55 @@ def test_gemini_check_fails_when_key_is_blank(monkeypatch):
     assert "GEMINI_API_KEY is not set" in check.message
 
 
+def test_youtube_check_passes_with_all_three_secrets_present_without_any_network_call(monkeypatch):
+    """Like the Gemini check, YouTube's preflight check is presence-only --
+    it must never refresh an access token or call the Data API (see the
+    task's explicit "do not consume YouTube upload quota during preflight"
+    requirement). Proven by making YouTubeProvider.__init__ raise if it is
+    ever constructed."""
+
+    def _must_not_be_constructed(self, *args, **kwargs):
+        raise AssertionError("YouTubeProvider must not be constructed during preflight")
+
+    monkeypatch.setattr("scripts.production.providers.youtube.YouTubeProvider.__init__", _must_not_be_constructed)
+
+    from scripts.production.preflight import _check_youtube
+
+    check = _check_youtube("client-id", "client-secret", "refresh-token")
+    assert check.passed
+    assert check.name == "youtube"
+
+
+def test_youtube_check_fails_when_any_secret_is_missing():
+    from scripts.production.preflight import _check_youtube
+
+    check = _check_youtube(None, "client-secret", "refresh-token")
+    assert not check.passed
+    assert "YOUTUBE_CLIENT_ID" in check.message
+
+    check = _check_youtube("client-id", "  ", "refresh-token")
+    assert not check.passed
+    assert "YOUTUBE_CLIENT_SECRET" in check.message
+
+    check = _check_youtube("client-id", "client-secret", None)
+    assert not check.passed
+    assert "YOUTUBE_REFRESH_TOKEN" in check.message
+
+
+def test_run_preflight_reports_missing_youtube_secrets():
+    with pytest.raises(PreflightError) as exc_info:
+        run_preflight(
+            gemini_api_key="present",
+            pexels_api_key=None,
+            pixabay_api_key=None,
+            telegram_bot_token=None,
+            telegram_chat_id=None,
+        )
+    message = str(exc_info.value)
+    assert "youtube" in message
+    assert "YOUTUBE_CLIENT_ID" in message
+
+
 def test_telegram_failure_with_present_credentials_never_leaks_token(monkeypatch):
     fake_token = "123456:fake-telegram-token-should-not-leak"
 

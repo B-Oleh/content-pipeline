@@ -1,13 +1,16 @@
 # Manually triggered end-to-end video production run: Research -> Script
 # (Gemini) -> Assets (Pexels/Pixabay, Gemini Vision-validated) -> Voice
 # (edge-tts) -> Subtitles -> Render (ffmpeg) -> QA -> Telegram delivery ->
-# bounded wait for an Approve/Regenerate/Reject decision. See
-# docs/PRODUCTION_PIPELINE.md for the full design.
+# bounded wait for an Approve/Regenerate/Reject decision -> (on Approve)
+# private YouTube upload + Telegram link. See docs/PRODUCTION_PIPELINE.md
+# for the full design.
 #
 # workflow_dispatch ONLY -- no schedule/cron/repository_dispatch (see
 # CLAUDE.md "Cloud execution and budget"). This proves the full pipeline
 # produces one real MP4 delivered to Telegram with real Approve/Regenerate/
-# Reject buttons; it does not automate publishing or scheduling.
+# Reject buttons, and that Approve uploads it to YouTube as PRIVATE (see
+# providers/youtube.py for why public publishing is out of scope for this
+# milestone); it does not automate scheduling.
 name: Produce Video (manual)
 
 on:
@@ -56,6 +59,13 @@ jobs:
       PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      # Used only when Approve is pressed, to upload the approved video to
+      # YouTube as private (see scripts/production/providers/youtube.py).
+      # Refresh-token OAuth flow only -- no interactive browser step, no
+      # client_secrets.json file.
+      YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+      YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+      YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
       # Used only by the "Regenerate" button's workflow-dispatch call (see
       # telegram_approval.py::trigger_regeneration_workflow) -- this is the
       # default per-run token GitHub Actions provides automatically, not a

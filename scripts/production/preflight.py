@@ -97,6 +97,32 @@ def _check_telegram(bot_token: str | None, chat_id: str | None) -> PreflightChec
         return PreflightCheck("telegram", False, f"Telegram check failed ({exc})")
 
 
+def _check_youtube(client_id: str | None, client_secret: str | None, refresh_token: str | None) -> PreflightCheck:
+    """Presence-only, like the Gemini check -- deliberately does NOT
+    refresh an access token or call the YouTube Data API here (see the
+    task's explicit "do not consume YouTube upload quota during preflight"
+    / "the real authentication/upload is tested when Approve occurs"
+    requirement, and CLAUDE.md's general "no paid/quota-consuming call
+    before it's actually needed" spirit). A genuine OAuth/auth problem
+    still surfaces clearly and immediately at Approve time via
+    YouTubeConfigError (see providers/youtube.py).
+    """
+    missing = [
+        name
+        for name, value in (
+            ("YOUTUBE_CLIENT_ID", client_id),
+            ("YOUTUBE_CLIENT_SECRET", client_secret),
+            ("YOUTUBE_REFRESH_TOKEN", refresh_token),
+        )
+        if not value or not value.strip()
+    ]
+    if missing:
+        return PreflightCheck("youtube", False, f"{', '.join(missing)} not set")
+    return PreflightCheck(
+        "youtube", True, "YouTube OAuth secrets are present (refresh/upload is verified at Approve time, not preflight)"
+    )
+
+
 def _safe_error_message(exc: Exception) -> str:
     """A short, credential-safe description of a preflight failure that
     always names the underlying exception class, so e.g. an auth failure,
@@ -131,6 +157,9 @@ def run_preflight(
     pixabay_api_key: str | None,
     telegram_bot_token: str | None,
     telegram_chat_id: str | None,
+    youtube_client_id: str | None = None,
+    youtube_client_secret: str | None = None,
+    youtube_refresh_token: str | None = None,
 ) -> list[PreflightCheck]:
     """Run every required check; raise PreflightError if any failed."""
     checks = [
@@ -138,6 +167,7 @@ def run_preflight(
         _check_pexels(pexels_api_key),
         _check_pixabay(pixabay_api_key),
         _check_telegram(telegram_bot_token, telegram_chat_id),
+        _check_youtube(youtube_client_id, youtube_client_secret, youtube_refresh_token),
     ]
     for check in checks:
         if check.passed:
@@ -162,11 +192,14 @@ def main() -> None:
             pixabay_api_key=os.getenv("PIXABAY_API_KEY"),
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN"),
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID"),
+            youtube_client_id=os.getenv("YOUTUBE_CLIENT_ID"),
+            youtube_client_secret=os.getenv("YOUTUBE_CLIENT_SECRET"),
+            youtube_refresh_token=os.getenv("YOUTUBE_REFRESH_TOKEN"),
         )
     except PreflightError as exc:
         print(f"PREFLIGHT FAILED: {exc}")
         sys.exit(1)
-    print("Preflight OK: Gemini API key present; Pexels, Pixabay, and Telegram are all reachable.")
+    print("Preflight OK: Gemini API key present; Pexels, Pixabay, Telegram, and YouTube OAuth secrets are all present/reachable.")
 
 
 if __name__ == "__main__":

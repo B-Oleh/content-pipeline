@@ -1,10 +1,12 @@
 # Video Production Pipeline
 
-First end-to-end milestone that turns one Research Agent topic into a real rendered vertical MP4
-delivered to Telegram with real, actually-handled Approve/Regenerate/Reject buttons. Covers
-CLAUDE.md pipeline stages 4-10 (Script Agent, Visual Planner, Asset Acquisition, Voice Generation,
-Video Assembly, Automated QA, Telegram approval gate — see "Telegram approval gate" below). Stage 1
-(Research Agent) is reused unchanged — see [docs/RESEARCH_AGENT.md](RESEARCH_AGENT.md).
+First end-to-end milestone that turns one Research Agent topic into a real rendered vertical MP4,
+delivers it to Telegram with real, actually-handled Approve/Regenerate/Reject buttons, and -- on
+Approve -- uploads it to YouTube as **private**. Covers CLAUDE.md pipeline stages 4-11 (Script
+Agent, Visual Planner, Asset Acquisition, Voice Generation, Video Assembly, Automated QA, Telegram
+approval gate, and the private-upload slice of Publishing — see "Telegram approval gate" and
+"YouTube publishing" below). Stage 1 (Research Agent) is reused unchanged — see
+[docs/RESEARCH_AGENT.md](RESEARCH_AGENT.md).
 
 Engineering rules (secrets, dependencies, logging, testing, provider abstraction) are defined once
 in CLAUDE.md and are not repeated here.
@@ -12,13 +14,17 @@ in CLAUDE.md and are not repeated here.
 ## Goal and non-goals
 
 The goal of this milestone is narrow and concrete: **one manual GitHub Actions run produces one
-real MP4, delivers it to Telegram with working Approve/Regenerate/Reject buttons, and actually
-handles a click on one of them.** Everything here is built to reach that, and no further:
+real MP4, delivers it to Telegram with working Approve/Regenerate/Reject buttons, and Approve
+actually uploads it to YouTube as private, returning the video's URL to Telegram.** Everything here
+is built to reach that, and no further:
 
-- No YouTube publishing yet -- Approve only records state as a clean integration point (see
-  "Telegram approval gate" below).
+- No PUBLIC YouTube publishing -- every upload is `privacyStatus: private` (see "YouTube
+  publishing" below for the compliance-audit restriction this works around). Making a video public
+  is a separate, not-yet-scoped milestone.
+- No YouTube compliance-audit automation, scheduling, analytics, comments, playlists, thumbnails,
+  channel management, or deleting/updating an already-uploaded video.
+- No TikTok, Instagram, or other platforms.
 - No scheduling/cron.
-- No analytics or affiliate automation.
 - No background music (narration-only audio for the first working pipeline).
 - No topic-history/game-history updates from this pipeline (see "Relationship to Research Agent
   state" below) -- that stays exclusively Research Agent's own concern.
@@ -52,6 +58,9 @@ scripts/production/
   telegram_approval.py                 Real Approve/Regenerate/Reject handling: keyboard, callback
                                         parsing, bounded long-poll wait, regeneration dispatch (see
                                         "Telegram approval gate" below)
+  youtube_publishing.py                Idempotent "check existing, else upload, then persist"
+                                        bookkeeping around providers/youtube.py -- no Telegram logic
+                                        (see "YouTube publishing" below)
   pipeline.py                          Orchestrates all of the above, in order
   ffmpeg_utils.py                      Shared ffprobe/ffmpeg-binary helpers
   providers/
@@ -60,6 +69,8 @@ scripts/production/
     voice.py                           VoiceProvider interface + EdgeTtsProvider
     telegram_client.py                 Telegram Bot API client: sendVideo (with buttons), getUpdates,
                                         answerCallbackQuery, sendMessage
+    youtube.py                         YouTube Data API v3 client: refresh-token OAuth, one
+                                        resumable videos.insert call -- no Telegram/state logic
 .github/workflows/produce_video.yml   Manually triggered (workflow_dispatch only) full run
 ```
 
@@ -84,13 +95,15 @@ qa.run_qa() -> QAResult
   if passed: telegram_delivery.deliver_video() -> Telegram (video + Approve/Regenerate/Reject buttons)
              telegram_approval.poll_for_decision() -> ApprovalState (bounded wait -- see below)
              REGENERATE -> telegram_approval.trigger_regeneration_workflow() -> new produce_video.yml run
+             APPROVE -> youtube_publishing.publish_approved_video() -> YouTube (private) -> Telegram link
+             REJECT / timeout -> nothing uploaded anywhere
   if failed: pipeline stops, nothing is sent (see "QA" below)
 ```
 
 Intermediate files (downloaded assets, per-scene audio, `captions.ass`, `script.json`,
-`qa_result.json`, `approval_state.json`) live under `data/production/` -- transient, gitignored,
-exactly like Research Agent's own `data/research/` (see docs/RESEARCH_AGENT.md "Persistent state vs
-transient output").
+`qa_result.json`, `approval_state.json`, `youtube_publications.json`) live under `data/production/`
+-- transient, gitignored, exactly like Research Agent's own `data/research/` (see
+docs/RESEARCH_AGENT.md "Persistent state vs transient output").
 The final video is written to `output/final_video.mp4` per this milestone's explicit requirement;
 `output/` is also gitignored (see CLAUDE.md "Repository structure") -- **the video is never
 committed to Git.**
@@ -452,11 +465,12 @@ stale `content_id`, so a user's tap is never left visibly hanging; only a match 
 
 **What each decision actually does** (`pipeline.py::_wait_for_approval`):
 - **✅ Approve** -- records `ApprovalState(decision="approve")` to `data/production/approval_state.json`
-  (transient, gitignored, same place as `script.json`) and sends the Telegram confirmation
-  "✅ Approved". This is the clean integration point for a future YouTube publisher (Stage 11): a
-  publisher stage can read this file and act only on `decision == "approve"`, without
-  `telegram_approval.py` knowing anything about YouTube. YouTube publishing itself is not
-  implemented.
+  (transient, gitignored, same place as `script.json`), then calls `pipeline.py::_handle_approve()`,
+  which uploads the approved video to YouTube (private) and sends the real result back to Telegram
+  -- see "YouTube publishing" below for the full mechanism. Note the toast/spinner-clear
+  (`answerCallbackQuery`) still fires immediately as before; only the *chat message* is now deferred
+  until the upload result is known, since a generic "✅ Approved" sent immediately would be
+  misleading (or stale once the real confirmation follows).
 - **🔄 Regenerate** -- acknowledges the callback, sends "🔄 Regeneration started", and calls
   `telegram_approval.py::trigger_regeneration_workflow()`, which dispatches a **new**
   `produce_video.yml` run via the GitHub REST API
@@ -477,16 +491,87 @@ stale `content_id`, so a user's tap is never left visibly hanging; only a match 
 - **Timeout** (no decision within the window) -- records `ApprovalState(decision="timeout")`; the
   video and its buttons remain in the Telegram chat, but this run takes no further action.
 
+## YouTube publishing
+
+**Why private-only.** Google's current API documentation restricts `videos.insert` uploads from
+unverified/unaudited API projects created after 2020-07-28 to `PRIVATE` visibility until the project
+passes a YouTube API compliance audit. `providers/youtube.py::DEFAULT_PRIVACY_STATUS` is `"private"`
+and every caller in this codebase uses it explicitly (never inherited implicitly) -- this milestone
+proves Approve -> authenticated upload -> video ID -> Telegram link, not public publishing. Making a
+video public is a separate, not-yet-scoped milestone that needs that audit first.
+
+**OAuth: refresh-token flow only.** `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, and
+`YOUTUBE_REFRESH_TOKEN` (GitHub Secrets in CI / `.env` locally, granted with the
+`https://www.googleapis.com/auth/youtube.upload` scope) are used to build a
+`google.oauth2.credentials.Credentials` object (`token=None`, `token_uri=
+"https://oauth2.googleapis.com/token"`) and immediately `.refresh()` it via
+`google.auth.transport.requests.Request()` -- this mints a fresh access token at runtime with no
+interactive browser step and no `client_secrets.json` file, which is what makes it safe to run
+unattended inside GitHub Actions. `providers/youtube.py::YouTubeProvider.__init__()` does this
+refresh eagerly (not lazily on first API call) so an invalid/revoked refresh token surfaces
+immediately as `YouTubeConfigError`, not as a confusing failure mid-upload. The authenticated
+`googleapiclient.discovery.build("youtube", "v3", credentials=...)` client is then used for exactly
+one call: `videos().insert(part="snippet,status", body=..., media_body=MediaFileUpload(...,
+resumable=True))`, uploaded in 8 MiB chunks via `next_chunk()` (with `num_retries=3` for
+transient-network resilience -- googleapiclient's own built-in retry, not a new subsystem).
+
+**Provider vs. state layer.** `providers/youtube.py` (`YouTubeProvider`) is a pure, stateless API
+wrapper -- validate config, refresh credentials, build the client, upload, return a
+`YouTubeUploadResult` (`video_id`, `youtube_url`, `privacy_status`). It contains no Telegram
+references and no idempotency logic. `youtube_publishing.py` (`publish_approved_video()`) wraps it
+with the "don't upload twice" check (see below) and also has no Telegram references. `pipeline.py`'s
+`_handle_approve()` is the only place that knows about both YouTube and Telegram: it constructs the
+provider, calls `publish_approved_video()`, and turns the result (or a caught
+`YouTubeConfigError`/`YouTubeUploadError`) into the Telegram message the user actually sees.
+
+**Metadata: never invented.** `snippet.title`/`snippet.description` come directly from
+`VideoScript.title`/`VideoScript.description` (the same Gemini-generated fields already shown in the
+Telegram caption -- see "Telegram approval gate" above) -- nothing new is generated for YouTube
+specifically. `snippet.categoryId` is a fixed `"20"` (YouTube's own "Gaming" category id, matching
+CLAUDE.md's niche) and `status.selfDeclaredMadeForKids` is a fixed `false`; `VideoScript` currently
+has no `tags` field, so none are sent (the task's "if tags already exist, they may be used" -- they
+don't exist yet, so none are invented).
+
+**Idempotency -- the critical requirement.** A second Approve press for the same `content_id` (e.g.
+a duplicate/accidental click) must never call `videos.insert` again.
+`youtube_publishing.py::publish_approved_video()` checks a small transient JSON file
+(`data/production/youtube_publications.json`, keyed by `content_id`, same gitignored `data/production/`
+directory as every other per-run file) for an existing successful-upload record *before* ever
+touching `YouTubeProvider`; if one exists, it is returned unchanged (no API call at all) and
+`_handle_approve()` sends Telegram the *same* confirmation with the *existing* YouTube URL. Only
+after a genuinely new upload succeeds is a `PublicationRecord` (`content_id`, `decision`,
+`youtube_video_id`, `youtube_url`, `privacy_status`, `uploaded_at`) written -- a **failed** upload
+never persists a record, so a legitimate retry (a later Approve, or a manual re-run) after a
+transient failure still attempts the upload for real rather than being mistaken for "already done".
+
+**Failure behavior.** `YouTubeConfigError` (missing/invalid OAuth config, a failed credential
+refresh) and `YouTubeUploadError` (the `videos.insert` call itself failed, or the response had no
+video id) are both constructed only from sanitized fields --
+`providers/youtube.py::_safe_error_message()` uses `HttpError.resp.status`/`.reason` (Google's own
+parsed JSON *response*-body fields) and otherwise just the exception's type name, mirroring
+`preflight.py`'s own `_safe_error_message` pattern -- never a raw exception string, which for
+HTTP-layer errors can include *request* details (where the bearer access token lives).
+`_handle_approve()` catches both, logs the sanitized message, and sends Telegram
+`"⚠️ Approved, but YouTube upload failed.\nReason: <sanitized>"` -- the approved decision, the
+recorded `ApprovalState`, and the video file on disk are all left untouched for a retry; nothing is
+auto-regenerated because a YouTube upload (a separate concern from generation quality) failed.
+
+**Preflight.** `preflight.py::_check_youtube()` is presence-only, exactly like the Gemini check (see
+"Gemini (Script Agent)" above) -- it does not refresh a token or call the YouTube API, so it never
+spends any of the YouTube API's own quota before Approve actually happens.
+
 ## Secrets
 
-`GEMINI_API_KEY`, `PEXELS_API_KEY`, `PIXABAY_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` are
-read from the environment only (`os.getenv`, GitHub Secrets in CI / `.env` locally) -- never
-hard-coded, never logged. `preflight.py` reports only presence/absence and pass/fail per service,
-using a provider's own safe error field when available (e.g. `google.genai.errors.APIError.message`,
-which comes from Gemini's own JSON error body) or just the exception's type name otherwise -- never
-a raw exception string, which for a lower-level transport error can include request details. See
-"Visuals" above for the two specific URL-based leak risks (Pixabay, Telegram) and how they're
-closed.
+`GEMINI_API_KEY`, `PEXELS_API_KEY`, `PIXABAY_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`,
+`YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, `YOUTUBE_REFRESH_TOKEN` are read from the environment
+only (`os.getenv`, GitHub Secrets in CI / `.env` locally) -- never hard-coded, never logged.
+`preflight.py` reports only presence/absence and pass/fail per service, using a provider's own safe
+error field when available (e.g. `google.genai.errors.APIError.message`, which comes from Gemini's
+own JSON error body) or just the exception's type name otherwise -- never a raw exception string,
+which for a lower-level transport error can include request details. See "Visuals" above for the
+two specific URL-based leak risks (Pixabay, Telegram), and "YouTube publishing" above for how a
+YouTube auth/upload failure is sanitized (never the client ID/secret, refresh/access token, or a raw
+Authorization header) before it ever reaches a log line or a Telegram message.
 
 Two more environment variables are read only for the "Regenerate" button (see "Telegram approval
 gate" above): `GITHUB_TOKEN` (the workflow's own default per-run token -- not a new secret to
@@ -514,7 +599,11 @@ dispatch a new run of this same workflow -- see "Telegram approval gate" above).
 `GITHUB_TOKEN` is passed into the job's `env` from `secrets.GITHUB_TOKEN` (the default per-run token
 GitHub Actions already provides -- not a new secret to create) purely so `os.getenv("GITHUB_TOKEN")`
 can see it; `GITHUB_REPOSITORY` needs no such wiring, since GitHub Actions sets it as a default
-environment variable on every runner automatically. On failure, `data/production/`, `output/`, and
+environment variable on every runner automatically. `YOUTUBE_CLIENT_ID`/`YOUTUBE_CLIENT_SECRET`/
+`YOUTUBE_REFRESH_TOKEN` are wired into the same `env` block from their GitHub Secrets, used only if
+Approve is pressed (see "YouTube publishing" above) -- integrated into this existing workflow's run
+rather than a second workflow, since this run stays alive for the whole bounded approval wait
+anyway. On failure, `data/production/`, `output/`, and
 `logs/` are uploaded as a short-retention (3 day) diagnostic artifact -- never treated as a
 publishing target, and containing no secrets (none of this pipeline's code ever writes a secret
 value to disk or a log line).
@@ -549,18 +638,34 @@ persistence, and the GitHub workflow-dispatch call (mocked `requests.post`) -- n
 GitHub API calls. `tests/production/test_gemini_provider.py` validates the Vision call's multimodal
 `input` shape (the `user_input`-step wrapper) against the real, installed `google-genai` SDK's own
 request model, the same technique already used there for `generate_script()`'s `response_format`.
-Everything else follows CLAUDE.md's no-public-internet-for-unit-tests rule via mocked HTTP
+`tests/production/test_youtube_provider.py` covers `YouTubeProvider` in isolation (monkeypatched
+`Credentials`/`build`, no real Google API): config validation, the exact refresh-token credential
+shape, that secrets never appear in logs/exceptions on success OR failure, the `videos.insert`
+request body (parts, `categoryId`, `privacyStatus: "private"`, `selfDeclaredMadeForKids: false`),
+and sanitized error handling. `tests/production/test_youtube_publishing.py` covers the idempotency
+layer against a fake provider: record persistence, "duplicate Approve does not upload twice",
+returning the existing URL, and that a failed upload never persists a record (so a retry still
+attempts a real upload). `tests/production/test_pipeline_approve.py` covers `pipeline.py`'s own
+Approve/Reject/Regenerate wiring (a fake `TelegramClient` and a fake `YouTubeProvider` monkeypatched
+into `pipeline.py`'s own namespace) -- proving Approve invokes the upload with the exact approved
+video path, Reject/Regenerate/timeout never construct a `YouTubeProvider` at all, and the Telegram
+confirmation text matches the success/failure/duplicate cases the task specifies. Everything else
+follows CLAUDE.md's no-public-internet-for-unit-tests rule via mocked HTTP
 (providers) or fake in-memory providers (`script_agent.py`, `asset_acquisition.py`), matching the
 pattern already established in `tests/research/`. Real Gemini (text and Vision)/Pexels/Pixabay/
-edge-tts/Telegram connectivity is only exercised for real inside the GitHub Actions workflow itself
--- see the top-level report for what that means was and wasn't verifiable during development.
+edge-tts/Telegram/YouTube connectivity is only exercised for real inside the GitHub Actions workflow
+itself (YouTube only when Approve is actually pressed) -- see the top-level report for what that
+means was and wasn't verifiable during development.
 
 ## Possible next steps (not implemented)
 
 - A persistent webhook receiver, if approval decisions after the ~20-minute window ever prove to
   matter in practice -- would need a new always-on hosting service outside the current $0/GitHub
   Actions architecture (see "Telegram approval gate" above), so needs explicit revisiting first.
-- YouTube publishing, reading `approval_state.json` for `decision == "approve"`.
+- PUBLIC YouTube publishing (needs the YouTube API compliance audit -- see "YouTube publishing"
+  above) -- private upload on Approve is implemented.
+- YouTube compliance audit automation, scheduling, analytics, comments, playlists, thumbnails,
+  channel management, deleting/updating an already-uploaded video, TikTok, Instagram.
 - Feeding the produced video's topic back into Research Agent's persistent state.
 - Background music (needs a clearly copyright-safe source and mixing logic).
 - Scheduling the production workflow once a manual run has been proven reliable.

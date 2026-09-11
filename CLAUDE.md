@@ -87,10 +87,12 @@ budget stage — this restricts what pipeline *runtime* code calls, not the use 
 the development assistant building this repository. Introducing or switching to any paid provider
 follows the "API integrations" approval rule below regardless of which concern it fills.
 
-LLM (Gemini), visual asset (Pexels/Pixabay), and voice/TTS (edge-tts) providers are implemented
-under `scripts/production/providers/` (see docs/PRODUCTION_PIPELINE.md) — each a small interface
-plus one concrete implementation, per the pattern above. The publisher and analytics provider
-concerns are not implemented yet.
+LLM (Gemini), visual asset (Pexels/Pixabay), voice/TTS (edge-tts), and publisher (YouTube) providers
+are implemented under `scripts/production/providers/` (see docs/PRODUCTION_PIPELINE.md) — each a
+small interface plus one concrete implementation, per the pattern above. The YouTube publisher
+(`providers/youtube.py`) currently only uploads a video as **private** (see "Pipeline stages" below
+and docs/PRODUCTION_PIPELINE.md "YouTube publishing" for why public publishing needs a separate,
+not-yet-done compliance audit). The analytics provider concern is not implemented yet.
 
 ## Cloud execution and budget
 
@@ -104,12 +106,13 @@ The single place for cloud/CI rules — do not restate these elsewhere.
   workflow"), which proves one real video reaches Telegram. Neither has a schedule.
 - The system must run within a strict $0 operating budget while in Stage 1 of the business
   strategy (see [`docs/BUSINESS_STRATEGY.md`](docs/BUSINESS_STRATEGY.md)). Gemini, Pexels,
-  Pixabay, and edge-tts are all used on their free tiers/no-cost access — see
-  docs/PRODUCTION_PIPELINE.md for which is which.
+  Pixabay, edge-tts, and the YouTube Data API v3 (free quota) are all used on their free
+  tiers/no-cost access — see docs/PRODUCTION_PIPELINE.md for which is which.
 - Any credential a GitHub Actions workflow needs is stored in GitHub Secrets, never committed
   (see "Environment variables and secret handling"). `produce_video.yml` needs
-  `GEMINI_API_KEY`, `PEXELS_API_KEY`, `PIXABAY_API_KEY`, `TELEGRAM_BOT_TOKEN`, and
-  `TELEGRAM_CHAT_ID`; `research_agent.yml` needs none. `produce_video.yml` also declares
+  `GEMINI_API_KEY`, `PEXELS_API_KEY`, `PIXABAY_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`,
+  `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, and `YOUTUBE_REFRESH_TOKEN`; `research_agent.yml`
+  needs none. `produce_video.yml` also declares
   `permissions: actions: write` (in addition to `contents: read`) so a Telegram "Regenerate" click
   can dispatch a new run of the same workflow via the GitHub REST API, using the default
   `GITHUB_TOKEN` GitHub Actions already provides to every run — not a new secret to create (see
@@ -161,9 +164,12 @@ Fact Checking) as standalone stages are not implemented as separate modules — 
 Research Agent's existing ranking (see docs/RESEARCH_AGENT.md "Ranking formula"), and Fact Checking is
 currently only the automated fabrication-claim guard inside Script Agent (see
 docs/PRODUCTION_PIPELINE.md "Gemini (Script Agent)"), not a fully independent verification stage.
-Stage 11 (Publishing) is not implemented — an Approve decision is recorded as a clean integration
-point for it (see "Telegram approval gate" below), nothing publishes automatically yet. Stages 12-13
-are not implemented.
+Stage 11 (Publishing) has a first, deliberately narrow implementation: an Approve decision now
+uploads the approved MP4 to YouTube via `providers/youtube.py` + `youtube_publishing.py` (see
+"Telegram approval gate" below and docs/PRODUCTION_PIPELINE.md "YouTube publishing") -- but only as
+**private**, since Google restricts `videos.insert` uploads from unaudited API projects to private
+visibility. Public publishing is a separate, not-yet-done milestone (needs that compliance audit).
+Stages 12-13 are not implemented.
 
 ### Research and opportunity scoring rules
 
@@ -274,10 +280,15 @@ not an always-on listener — this is the "favor event-driven ... over polling l
 practical limit at $0/GitHub-Actions-only, not an exception to it (the poll is bounded to one manual
 run, not a recurring scheduled job, and each request blocks server-side rather than busy-looping).
 A click after that window closes is not handled by that run. Regenerate re-dispatches
-`produce_video.yml` for the same topic via the GitHub REST API; Approve/Reject only record decision
-state today (`data/production/approval_state.json`, transient) as a clean integration point for
-Stage 11 (Publishing) once it exists — nothing publishes automatically yet. "Current development
-stage" and "Human approval required" below still apply until Publishing exists.
+`produce_video.yml` for the same topic via the GitHub REST API and never uploads the
+rejected/original version anywhere; Reject only records decision state
+(`data/production/approval_state.json`, transient) and uploads nothing. Approve now also uploads the
+exact approved MP4 to YouTube as **private** (see "Pipeline stages" above and
+docs/PRODUCTION_PIPELINE.md "YouTube publishing") — idempotently, via a per-content_id publication
+record (`data/production/youtube_publications.json`, transient) that prevents a second Approve press
+for the same video from uploading it twice. "Current development stage" and "Human approval
+required" below still apply to *public* publishing, which remains a separate, not-yet-done
+milestone.
 
 ### Analytics and learning feedback loop
 

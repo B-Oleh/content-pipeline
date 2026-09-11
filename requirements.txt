@@ -10,7 +10,15 @@ pytest>=8.0.0
 #   body overlay text, composited via ffmpeg's `overlay` filter -- ffmpeg's own `drawtext` filter
 #   has no word-wrap or auto-fit, which is what caused text to run off the frame (see that
 #   module's docstring). >=10.1.0 for ImageFont.load_default(size=...)'s scalable fallback font.
+# google-auth: refresh-token OAuth credential handling for YouTube uploads (Credentials +
+#   Request) -- no interactive browser flow, no client_secrets.json (see
+#   scripts/production/providers/youtube.py). Added explicitly even though google-genai already
+#   pulls it in transitively, per this task's "add explicit required dependencies" requirement.
+# google-api-python-client: authenticated YouTube Data API v3 client (`videos.insert`) and
+#   resumable MediaFileUpload.
 requests>=2.31.0
 google-genai>=1.0.0
 edge-tts>=6.1.0
 Pillow>=10.1.0
+google-auth>=2.23.0
+google-api-python-client>=2.100.0

@@ -4,9 +4,11 @@ Usage:
     python -m scripts.produce_video
 
 Reads GEMINI_API_KEY, PEXELS_API_KEY, PIXABAY_API_KEY, TELEGRAM_BOT_TOKEN,
-TELEGRAM_CHAT_ID from the environment (GitHub Secrets in CI, .env locally --
-see CLAUDE.md "Environment variables and secret handling"). Never logs
-their values. See docs/PRODUCTION_PIPELINE.md for the full pipeline design.
+TELEGRAM_CHAT_ID, YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET,
+YOUTUBE_REFRESH_TOKEN from the environment (GitHub Secrets in CI, .env
+locally -- see CLAUDE.md "Environment variables and secret handling").
+Never logs their values. See docs/PRODUCTION_PIPELINE.md for the full
+pipeline design.
 
 Also reads three optional environment variables used only by the Telegram
 "Regenerate" button (see telegram_approval.py):
@@ -52,6 +54,9 @@ def main(argv: list[str] | None = None) -> None:
     github_token = os.getenv("GITHUB_TOKEN")
     github_repository = os.getenv("GITHUB_REPOSITORY")
     topic_override = os.getenv("TOPIC_OVERRIDE") or None
+    youtube_client_id = os.getenv("YOUTUBE_CLIENT_ID")
+    youtube_client_secret = os.getenv("YOUTUBE_CLIENT_SECRET")
+    youtube_refresh_token = os.getenv("YOUTUBE_REFRESH_TOKEN")
 
     logger.info("Running preflight checks")
     try:
@@ -61,6 +66,9 @@ def main(argv: list[str] | None = None) -> None:
             pixabay_api_key=pixabay_api_key,
             telegram_bot_token=telegram_bot_token,
             telegram_chat_id=telegram_chat_id,
+            youtube_client_id=youtube_client_id,
+            youtube_client_secret=youtube_client_secret,
+            youtube_refresh_token=youtube_refresh_token,
         )
     except PreflightError as exc:
         logger.error(str(exc))
@@ -82,6 +90,9 @@ def main(argv: list[str] | None = None) -> None:
         topic_override=topic_override,
         github_token=github_token,
         github_repository=github_repository,
+        youtube_client_id=youtube_client_id,
+        youtube_client_secret=youtube_client_secret,
+        youtube_refresh_token=youtube_refresh_token,
     )
 
     print(f"Video: {result.video_path}")

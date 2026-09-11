@@ -124,6 +124,11 @@ def _callback_update(update_id: int, callback_id: str, data: str) -> dict:
 
 
 def test_poll_for_decision_approve_changes_state():
+    """Approve's toast/spinner-clear still fires immediately, but (unlike
+    Reject/Regenerate) no chat message is sent here -- the real
+    upload-result-dependent confirmation is sent later by
+    pipeline.py::_handle_approve, once it knows whether the YouTube upload
+    succeeded (see that module's tests)."""
     client = _FakeTelegramClient([[_callback_update(1, "cb1", "approve:content-42")]])
 
     state = poll_for_decision(client, "content-42", timeout_seconds=5, long_poll_seconds=1)
@@ -131,7 +136,7 @@ def test_poll_for_decision_approve_changes_state():
     assert state.decision == APPROVE_ACTION
     assert state.content_id == "content-42"
     assert client.answered == [("cb1", "✅ Approved")]
-    assert client.messages_sent == ["✅ Approved"]
+    assert client.messages_sent == []
 
 
 def test_poll_for_decision_reject_changes_state():

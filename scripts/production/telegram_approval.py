@@ -114,10 +114,10 @@ def parse_callback_data(data: str) -> tuple[str, str]:
 def save_approval_state(path: Path, state: ApprovalState) -> None:
     """Records the decision as plain transient JSON under the run's own
     workdir (same place as script.json/qa_result.json) -- not committed to
-    Git. This is the "clean integration point for the future YouTube
-    publisher": a publisher stage can later read this file and act only on
-    decision == "approve", without this module knowing anything about
-    YouTube."""
+    Git. This module still knows nothing about YouTube: pipeline.py reads
+    `decision == "approve"` and drives the actual upload via
+    youtube_publishing.py/providers/youtube.py, kept separate on purpose
+    (see those modules' docstrings)."""
     atomic_write_text(path, json.dumps(state.to_dict(), indent=2))
 
 
@@ -178,7 +178,19 @@ def poll_for_decision(
                 continue
 
             _safe_answer(client, callback["id"], _CONFIRMATION_TEXT[action])
-            _safe_send_message(client, _CONFIRMATION_TEXT[action])
+            if action != APPROVE_ACTION:
+                # Reject/Regenerate: unchanged -- their confirmation text
+                # never depends on anything that happens after this point,
+                # so it is sent immediately, same as before.
+                #
+                # Approve is different: the real confirmation now depends
+                # on whether the YouTube upload succeeds, which is only
+                # known after this function returns (see
+                # pipeline.py::_handle_approve). Sending the generic
+                # "✅ Approved" here too would leave a stale/misleading
+                # message in the chat once the richer upload-result message
+                # follows, so it is deliberately skipped for this action.
+                _safe_send_message(client, _CONFIRMATION_TEXT[action])
             logger.info("Received decision %r for content_id=%s", action, content_id)
             return ApprovalState(content_id=content_id, decision=action)
 
