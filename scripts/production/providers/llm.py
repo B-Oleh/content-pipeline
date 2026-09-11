@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import base64
 import json
+import random
 import re
-from typing import Any
+import time
+from typing import Any, Callable, Optional, TypeVar
 
 from scripts.production.models import Scene, VideoScript
 from scripts.utils.logging_utils import get_logger
@@ -19,6 +21,21 @@ from scripts.utils.logging_utils import get_logger
 logger = get_logger(__name__)
 
 DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
+
+# Gemini's free tier is small (the incident this fixes: HTTP 429 "Quota
+# exceeded for generativelanguage.googleapis.com/generate_content_free_tier_requests,
+# limit: 20" mid-run) -- a small, safe retry cap with exponential backoff +
+# jitter, honoring the server's own Retry-After when it provides one,
+# turns a single transient rate-limit hit into a short wait instead of an
+# immediate pipeline failure (see _call_with_retry). This does NOT retry
+# any other kind of failure (auth, malformed response, etc.) -- those fail
+# immediately, unchanged.
+GEMINI_MAX_RETRIES = 3
+GEMINI_BASE_RETRY_DELAY_SECONDS = 2.0
+GEMINI_MAX_RETRY_DELAY_SECONDS = 60.0
+GEMINI_RETRY_JITTER_RATIO = 0.25
+
+_T = TypeVar("_T")
 
 # The most concretely fabricable "hard numbers" this niche's rules forbid
 # inventing (see CLAUDE.md "Fact checking" and "Research and opportunity
@@ -141,6 +158,80 @@ _PING_PROMPT = "Reply exactly with OK"
 _INTERACTION_FAILURE_HINT = "did not complete successfully"
 
 
+def _is_rate_limited(exc: Exception) -> bool:
+    """True for an HTTP 429 from the google-genai SDK.
+
+    Duck-typed on `.code` rather than importing/isinstance-checking
+    `google.genai.errors.ClientError` -- the SDK raises that for every 4xx
+    response with `.code` set to the HTTP status, so checking the
+    attribute directly is exactly as precise, and it lets tests exercise
+    this with a plain fake exception (no real httpx/requests Response
+    needed to construct a genuine SDK error -- see
+    tests/production/test_gemini_provider.py).
+    """
+    return getattr(exc, "code", None) == 429
+
+
+def _extract_retry_after_seconds(exc: Exception) -> Optional[float]:
+    """Best-effort read of a server-provided retry delay: the standard
+    HTTP `Retry-After` response header first, then Google's structured
+    `RetryInfo` error detail (`{"retryDelay": "42s"}`) if present. Returns
+    None if neither is available/parseable, so the caller falls back to
+    its own exponential backoff instead of guessing.
+    """
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        try:
+            raw = headers.get("Retry-After") or headers.get("retry-after")
+        except AttributeError:
+            raw = None
+        if raw:
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                pass
+
+    details = getattr(exc, "details", None)
+    error_body = details.get("error", details) if isinstance(details, dict) else None
+    if isinstance(error_body, dict):
+        for item in error_body.get("details") or []:
+            if not isinstance(item, dict):
+                continue
+            retry_delay = item.get("retryDelay")
+            if isinstance(retry_delay, str) and retry_delay.endswith("s"):
+                try:
+                    return float(retry_delay[:-1])
+                except ValueError:
+                    continue
+    return None
+
+
+def _call_with_retry(operation: Callable[[], _T], *, max_retries: int = GEMINI_MAX_RETRIES) -> _T:
+    """Runs `operation()`, retrying only on HTTP 429 (see _is_rate_limited)
+    up to `max_retries` times with exponential backoff + jitter -- or the
+    server's own Retry-After/RetryInfo delay when it provides one. Any
+    other exception (auth failure, malformed response, a non-429 HTTP
+    error, ...) propagates immediately, unretried.
+    """
+    attempts_made = 0
+    while True:
+        try:
+            return operation()
+        except Exception as exc:  # noqa: BLE001 -- only 429s are handled here; everything else re-raises below
+            if not _is_rate_limited(exc) or attempts_made >= max_retries:
+                raise
+            attempts_made += 1
+            delay = _extract_retry_after_seconds(exc)
+            if delay is None:
+                delay = min(GEMINI_MAX_RETRY_DELAY_SECONDS, GEMINI_BASE_RETRY_DELAY_SECONDS * (2 ** (attempts_made - 1)))
+            else:
+                delay = min(delay, GEMINI_MAX_RETRY_DELAY_SECONDS)
+            delay += random.uniform(0, delay * GEMINI_RETRY_JITTER_RATIO)
+            logger.warning("Gemini rate limited, retrying in %.1f seconds (attempt %d/%d)", delay, attempts_made, max_retries)
+            time.sleep(delay)
+
+
 def _describe_incomplete_interaction(interaction: Any) -> str:
     """A safe, useful description of why an Interaction has no output_text.
 
@@ -179,14 +270,16 @@ class GeminiProvider(LlmProvider):
         self._model = model
 
     def generate_script(self, prompt: str) -> str:
-        interaction = self._client.interactions.create(
-            model=self._model,
-            input=prompt,
-            response_format={
-                "type": "text",
-                "mime_type": "application/json",
-                "schema": SCRIPT_JSON_SCHEMA,
-            },
+        interaction = _call_with_retry(
+            lambda: self._client.interactions.create(
+                model=self._model,
+                input=prompt,
+                response_format={
+                    "type": "text",
+                    "mime_type": "application/json",
+                    "schema": SCRIPT_JSON_SCHEMA,
+                },
+            )
         )
         text = getattr(interaction, "output_text", None)
         if not text:
@@ -203,22 +296,24 @@ class GeminiProvider(LlmProvider):
         validation approach used for generate_script's response_format).
         """
         image_b64 = base64.b64encode(image_bytes).decode("ascii")
-        interaction = self._client.interactions.create(
-            model=self._model,
-            input=[
-                {
-                    "type": "user_input",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image", "data": image_b64, "mime_type": mime_type},
-                    ],
-                }
-            ],
-            response_format={
-                "type": "text",
-                "mime_type": "application/json",
-                "schema": VISION_EVALUATION_SCHEMA,
-            },
+        interaction = _call_with_retry(
+            lambda: self._client.interactions.create(
+                model=self._model,
+                input=[
+                    {
+                        "type": "user_input",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image", "data": image_b64, "mime_type": mime_type},
+                        ],
+                    }
+                ],
+                response_format={
+                    "type": "text",
+                    "mime_type": "application/json",
+                    "schema": VISION_EVALUATION_SCHEMA,
+                },
+            )
         )
         text = getattr(interaction, "output_text", None)
         if not text:
@@ -234,7 +329,7 @@ class GeminiProvider(LlmProvider):
         plain connectivity/auth failure can never be confused with (or
         masked by) a structured-output or tool-calling problem.
         """
-        interaction = self._client.interactions.create(model=self._model, input=_PING_PROMPT)
+        interaction = _call_with_retry(lambda: self._client.interactions.create(model=self._model, input=_PING_PROMPT))
         text = getattr(interaction, "output_text", None)
         if not text:
             raise GeminiPingError(_describe_incomplete_interaction(interaction))

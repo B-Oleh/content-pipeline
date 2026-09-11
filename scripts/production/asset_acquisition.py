@@ -9,13 +9,18 @@ keyword/URL overlap, aspect ratio, shot-type variety) purely to build a
 short, affordable shortlist; that metadata score is NOT the final relevance
 decision (see visual_relevance.py's docstring update: it proved
 semantically wrong on its own, e.g. matching a paper greeting card to a
-"graphics card" scene on the shared word "card"). The shortlist is then
-sent to vision_validation.py, which uses Gemini Vision to actually look at
-each candidate's thumbnail and makes the real accept/reject call. If
-nothing survives Vision validation, a designed information card is
-rendered instead of misleading generic footage (see info_card.py and the
-task's explicit "never imply generic stock footage is footage of a
-specific named game, GPU, laptop, or product" requirement).
+"graphics card" scene on the shared word "card"). Duplicate candidates
+(the same asset turned up by more than one query) are collapsed by
+_dedupe_candidates() before the shortlist is ever built, so Gemini Vision
+never sees the same thumbnail twice for no reason -- see
+vision_validation.py's own SHORTLIST_SIZE/cache for the rest of that quota
+story (real GitHub Actions runs have hit Gemini's free-tier request
+quota). The shortlist is then sent to vision_validation.py, which uses
+Gemini Vision to actually look at each candidate's thumbnail and makes the
+real accept/reject call. If nothing survives Vision validation, a designed
+information card is rendered instead of misleading generic footage (see
+info_card.py and the task's explicit "never imply generic stock footage is
+footage of a specific named game, GPU, laptop, or product" requirement).
 """
 
 from __future__ import annotations
@@ -27,7 +32,7 @@ from scripts.production.info_card import InfoCardError, render_info_card
 from scripts.production.models import Scene
 from scripts.production.providers.llm import LlmProvider
 from scripts.production.providers.visual import AssetResult, VisualAssetProvider
-from scripts.production.vision_validation import SHORTLIST_SIZE, select_vision_validated_candidate
+from scripts.production.vision_validation import SHORTLIST_SIZE, VisionEvaluation, select_vision_validated_candidate
 from scripts.production.visual_relevance import (
     INFO_CARD_SHOT_TYPE,
     ScoredCandidate,
@@ -76,14 +81,36 @@ def _score_all(
     return [score_candidate(asset, scene, query, previous_shot_type) for asset, query in candidates]
 
 
+def _dedupe_candidates(scored: list[ScoredCandidate]) -> list[ScoredCandidate]:
+    """Collapses duplicate candidates -- the same underlying asset returned
+    by more than one search query -- to a single entry BEFORE any of them
+    ever reaches Vision. This is deterministic (no API call) filtering, per
+    the task's "prefer deterministic filtering before Vision" and "do not
+    evaluate the same thumbnail twice" requirements: without this, a scene
+    with several overlapping queries could otherwise fill its whole
+    Vision shortlist with copies of the same one asset. Keeps the
+    highest-metadata-scored occurrence of each distinct asset (identified
+    by its thumbnail, falling back to its page URL if no thumbnail is
+    available).
+    """
+    best_by_identity: dict[str, ScoredCandidate] = {}
+    for candidate in scored:
+        identity = candidate.asset.thumbnail_url or candidate.asset.page_url
+        existing = best_by_identity.get(identity)
+        if existing is None or candidate.score > existing.score:
+            best_by_identity[identity] = candidate
+    return list(best_by_identity.values())
+
+
 def _shortlist_candidates(
     scene: Scene, providers: list[VisualAssetProvider], previous_shot_type: Optional[str]
 ) -> list[ScoredCandidate]:
     """Gathers candidates from every query against both providers (video
     first, photo fallback), scores them with the cheap metadata-only
-    signal, and returns the top SHORTLIST_SIZE, best-first -- this is only
-    a pre-filter to bound how many candidates get a real Vision call (see
-    module docstring); it is NOT the final relevance decision."""
+    signal, deduplicates identical assets, and returns the top
+    SHORTLIST_SIZE, best-first -- this is only a pre-filter to bound how
+    many candidates get a real Vision call (see module docstring); it is
+    NOT the final relevance decision."""
     video_candidates = _collect_candidates(scene, providers, "search_videos")
     scored = _score_all(video_candidates, scene, previous_shot_type)
 
@@ -91,6 +118,7 @@ def _shortlist_candidates(
         photo_candidates = _collect_candidates(scene, providers, "search_photos")
         scored = _score_all(photo_candidates, scene, previous_shot_type)
 
+    scored = _dedupe_candidates(scored)
     scored.sort(key=lambda candidate: candidate.score, reverse=True)
     return scored[:SHORTLIST_SIZE]
 
@@ -146,14 +174,22 @@ def acquire_assets(
 ) -> None:
     """Find (or synthesize) and set one asset per scene, mutating each Scene
     in place. `llm_provider` makes the final Vision-based relevance call
-    over each scene's cheap metadata shortlist (see module docstring)."""
+    over each scene's cheap metadata shortlist (see module docstring).
+
+    `vision_cache` is created once here and threaded through every scene's
+    Vision call so an identical thumbnail+context is never sent to Gemini
+    twice within this run (see vision_validation.py's own cache-key
+    docstring for why it is scoped to exact thumbnail+scene+query matches,
+    not thumbnail alone).
+    """
     assets_dir = Path(workdir) / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
+    vision_cache: dict[tuple[str, str, Optional[str], str], VisionEvaluation] = {}
 
     previous_shot_type: Optional[str] = None
     for scene in scenes:
         shortlist = _shortlist_candidates(scene, providers, previous_shot_type)
-        approved = select_vision_validated_candidate(llm_provider, shortlist, scene) if shortlist else None
+        approved = select_vision_validated_candidate(llm_provider, shortlist, scene, cache=vision_cache) if shortlist else None
 
         if approved is not None:
             _download_best_candidate(scene, approved, providers, assets_dir)

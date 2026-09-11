@@ -156,18 +156,47 @@ title/pillar/role/monetization path/summary, the Research Agent scoring reasonin
 evidence item from `raw_metadata["evidence"]` (see docs/RESEARCH_AGENT.md "Evidence") -- the model
 is instructed to ground claims in that evidence and never invent specifics beyond it.
 
-**Gemini preflight.** `GeminiProvider.ping()` sends nothing beyond `model` and a fixed prompt
-("Reply exactly with OK") -- no tools, no response schema -- specifically so a plain
-connectivity/auth failure is never confused with a structured-output or tool-calling problem.
-Both `ping()` and `generate_script()` read `interaction.output_text` (the SDK's own "concatenated
-text from the last model output" convenience field); if it is empty, the failure reason comes from
-the interaction's own `status` and `errors[].message` (both provider-supplied, safe to log in
-full -- see `_describe_incomplete_interaction`), not a guess. A ping failure raises
-`GeminiPingError`; a script-generation failure raises `ScriptGenerationError` -- two distinct
-exception types, so `preflight.py` never reports a connectivity problem as if it were a script
-validation problem, and vice versa. `preflight.py::_safe_error_message` always names the
-underlying exception's class alongside whatever safe message is available, instead of collapsing
-every Gemini failure into one indistinguishable string.
+**Gemini preflight does not call Gemini.** `preflight.py::_check_gemini()` only checks that
+`GEMINI_API_KEY` is a non-blank string -- it deliberately does **not** call `GeminiProvider.ping()`
+(which still exists, and still works exactly as described below, for any caller that wants a
+schema-free connectivity check) or any other Gemini endpoint. `script_agent.generate_script()`
+makes a real Gemini call moments after preflight passes; a separate live probe in preflight would
+burn one of Gemini's free-tier request-quota units for nothing before the pipeline has done any
+real work -- exactly what pushed a real run over Gemini's 20-request free-tier quota (HTTP 429
+"Quota exceeded ... generate_content_free_tier_requests, limit: 20"). The first real
+`generate_script()` call now serves as the actual connectivity test instead (see "Gemini quota
+resilience" below for what happens if that call itself hits a 429).
+
+`GeminiProvider.ping()` (unused by preflight, kept as a general-purpose schema-free connectivity
+check) sends nothing beyond `model` and a fixed prompt ("Reply exactly with OK") -- no tools, no
+response schema -- specifically so a plain connectivity/auth failure is never confused with a
+structured-output or tool-calling problem. `ping()` and `generate_script()` both read
+`interaction.output_text` (the SDK's own "concatenated text from the last model output" convenience
+field); if it is empty, the failure reason comes from the interaction's own `status` and
+`errors[].message` (both provider-supplied, safe to log in full -- see
+`_describe_incomplete_interaction`), not a guess. A ping failure raises `GeminiPingError`; a
+script-generation failure raises `ScriptGenerationError` -- two distinct exception types, so
+nothing collapses a connectivity problem and a script validation problem into the same reported
+type. `preflight.py::_safe_error_message` (still used by the Pexels/Pixabay/Telegram checks, which
+remain live probes) always names the underlying exception's class alongside whatever safe message
+is available, instead of collapsing every failure into one indistinguishable string.
+
+**Gemini quota resilience.** `providers/llm.py::_call_with_retry()` wraps every
+`interactions.create(...)` call (`generate_script()`, `evaluate_visual_candidate()`, and `ping()`)
+and retries ONLY on an HTTP 429 (`_is_rate_limited()` -- duck-typed on the SDK's `ClientError.code
+== 429`, not a specific caught exception class, so a fake object with that attribute is enough to
+exercise it in tests). Up to `GEMINI_MAX_RETRIES` (3) retries, honoring the server's own
+`Retry-After` header or Google's structured `RetryInfo.retryDelay` detail when present
+(`_extract_retry_after_seconds()`), otherwise exponential backoff (`GEMINI_BASE_RETRY_DELAY_SECONDS`
+doubling each attempt, capped at `GEMINI_MAX_RETRY_DELAY_SECONDS`) plus up to 25% jitter -- logged
+as `"Gemini rate limited, retrying in N seconds"` (never including request/response bodies or the
+API key). Any other exception (auth failure, malformed response, a non-429 HTTP error) is not
+retried and propagates immediately, unchanged from before. This turns one transient rate-limit hit
+into a short wait instead of an immediate pipeline failure; it does not change what happens once
+the retry budget is exhausted -- that still raises loudly (see the per-caller exception types
+above), except inside `vision_validation.py`'s per-candidate try/except, where an exhausted retry on
+one candidate is already treated as a rejection of that candidate, not a whole-scene failure (see
+"Visuals" below).
 
 **Fabrication guard.** The prompt instructs Gemini never to state a specific FPS number, price,
 exact spec, release date, popularity statistic, or performance percentage unless it is in the
@@ -226,8 +255,13 @@ BOTH providers' video search (falling back to photo search only if no video cand
 all), stopping early once `MIN_CANDIDATE_POOL_SIZE` (6) candidates have been collected to stay
 within free-tier rate limits. Every candidate is first scored by
 `visual_relevance.py::score_candidate()` -- metadata-only (search query, the result's own page-URL
-slug, width/height; no image download) -- and only the top `SHORTLIST_SIZE` (3) candidates, best
-metadata score first, are kept.
+slug, width/height; no image download) -- then deduplicated by `_dedupe_candidates()` (the same
+underlying asset returned by more than one search query collapses to its single
+highest-metadata-scored occurrence, so overlapping queries can never fill the Vision shortlist with
+copies of one asset), and only the top `SHORTLIST_SIZE` (2) candidates, best metadata score first,
+are kept. `SHORTLIST_SIZE` was reduced from 3 to 2 (and this dedup step added) after a real GitHub
+Actions run hit Gemini's free-tier request quota (HTTP 429 "Quota exceeded ...
+generate_content_free_tier_requests, limit: 20") -- see "Gemini quota resilience" above.
 
 **This metadata score is a pre-filter only, not the relevance decision.** An earlier version of this
 pipeline used it as the final decision (the "deterministic metadata/query scoring fallback"), and
@@ -253,11 +287,23 @@ call -- see "Gemini Vision (visual relevance)" below). Gemini returns `{"compute
 `computer_domain` is true, `misleading` is false, AND `scene_relevance_score >=
 VISION_RELEVANCE_THRESHOLD` (70); among every candidate that passes, the one with the **highest**
 `scene_relevance_score` is selected -- a 72 never wins over a 94 just because it was evaluated first.
-This still bounds Gemini Vision calls to at most `SHORTLIST_SIZE` (3) per scene (per the task's
-"avoid using Gemini Vision on excessive candidates" requirement) rather than every raw search hit --
-the shortlist size controls cost, not an early-exit. A candidate with no `thumbnail_url`, or one
-whose Vision call itself fails (network, malformed response), is treated as rejected rather than
-crashing the scene's search or silently falling back to the metadata score.
+This still bounds Gemini Vision calls to at most `SHORTLIST_SIZE` (2) per scene (per the task's
+"only call Vision for the final 2-3 candidates per scene" requirement) rather than every raw search
+hit -- the shortlist size controls cost, not an early-exit. A candidate with no `thumbnail_url`, or
+one whose Vision call itself fails (network, malformed response, or an exhausted 429 retry budget --
+see "Gemini quota resilience" above), is treated as rejected rather than crashing the scene's search
+or silently falling back to the metadata score.
+
+`acquire_assets()` also threads one `vision_cache` dict through every scene in the run, so the exact
+same thumbnail+context (image URL, scene narration, on-screen text, and query -- everything that
+actually determines Vision's answer, see `vision_validation.py::_vision_cache_key()`) is never sent
+to Gemini twice within one pipeline run. This is deliberately scoped to an exact match rather than
+thumbnail alone: the same image can genuinely be relevant to one scene and not another, so caching
+purely by thumbnail across different scenes would risk reusing a judgment that no longer applies --
+which CLAUDE.md's "Quality control checklist" and this task's own "do not change output quality
+rules" both rule out. In practice this cache mostly catches the rarer case of two otherwise-distinct
+candidates sharing one CDN thumbnail URL; the far more common overlapping-query duplicate is already
+removed earlier, for free, by `_dedupe_candidates()` above.
 
 **Fallback: information card, with NO rejected asset in it.** If every shortlisted candidate is
 rejected (or none was found at all), `asset_acquisition.py` renders a designed **information card**

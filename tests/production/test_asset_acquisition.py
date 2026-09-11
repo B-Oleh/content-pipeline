@@ -23,7 +23,8 @@ from pathlib import Path
 
 import pytest
 
-from scripts.production.asset_acquisition import acquire_assets
+from scripts.production.asset_acquisition import _dedupe_candidates, acquire_assets
+from scripts.production.visual_relevance import ScoredCandidate
 from scripts.production.models import Scene
 from scripts.production.providers.llm import LlmProvider, VisionEvaluationError
 from scripts.production.providers.visual import AssetResult, VisualAssetProvider
@@ -386,6 +387,63 @@ def test_when_every_shortlisted_candidate_is_rejected_the_info_card_uses_no_asse
     assert scene.asset_source == "info_card"
     assert len(pexels.downloaded) == 0
     assert scene.asset_path is not None and scene.asset_path.exists()
+
+
+def test_dedupe_candidates_keeps_the_highest_scoring_occurrence_of_a_duplicate():
+    same_asset = _asset("pexels", "https://pexels.com/video/desktop-gpu-inside-pc-case-1")
+    other_asset = _asset("pexels", "https://pexels.com/video/unrelated-1")
+    weak = ScoredCandidate(asset=same_asset, query="q1", score=0.2, shot_type="hardware_detail", reason="weak match")
+    strong = ScoredCandidate(asset=same_asset, query="q2", score=0.9, shot_type="hardware_detail", reason="strong match")
+    distinct = ScoredCandidate(asset=other_asset, query="q3", score=0.5, shot_type="environment_setup", reason="other")
+
+    deduped = _dedupe_candidates([weak, strong, distinct])
+
+    assert len(deduped) == 2
+    kept = next(c for c in deduped if c.asset is same_asset)
+    assert kept is strong
+
+
+def test_duplicate_candidates_from_overlapping_queries_are_deduped_before_vision(tmp_path, monkeypatch):
+    """Two different queries returning the exact same underlying asset
+    (a realistic overlap between similar search phrases) must not cost two
+    Vision calls -- deterministic dedup happens before Vision ever sees it
+    (see asset_acquisition.py::_dedupe_candidates)."""
+    _patch_thumbnail_fetch(monkeypatch)
+    scene = _scene(0, "A desktop GPU inside a PC case", ["desktop gpu inside pc case", "gpu installed in gaming pc"])
+    same_asset_hit_twice = _asset("pexels", "https://pexels.com/video/desktop-gpu-inside-pc-case-1")
+    pexels = _FakeProvider(
+        "pexels",
+        {
+            "desktop gpu inside pc case": [same_asset_hit_twice],
+            "gpu installed in gaming pc": [same_asset_hit_twice],
+        },
+    )
+    llm = _FakeLlmProvider([_approve()])
+
+    acquire_assets([scene], [pexels], tmp_path, llm)
+
+    assert scene.asset_source == "pexels"
+    assert len(llm.vision_calls) == 1
+
+
+def test_vision_cache_prevents_reevaluating_the_same_thumbnail_across_scenes(tmp_path, monkeypatch):
+    """Two scenes that happen to share the exact same narration, on-screen
+    text, query, and candidate thumbnail must reuse the first scene's
+    Vision judgment for the second rather than asking Gemini again -- see
+    vision_validation.py's cache-key docstring for why this is scoped to
+    an exact thumbnail+context match, not thumbnail alone."""
+    _patch_thumbnail_fetch(monkeypatch)
+    identical_asset = _asset("pexels", "https://pexels.com/video/desktop-gpu-inside-pc-case-1")
+    scene_a = _scene(0, "A desktop GPU inside a PC case", ["desktop gpu inside pc case"])
+    scene_b = _scene(1, "A desktop GPU inside a PC case", ["desktop gpu inside pc case"])
+    pexels = _FakeProvider("pexels", {"desktop gpu inside pc case": [identical_asset]})
+    llm = _FakeLlmProvider([_approve()])
+
+    acquire_assets([scene_a, scene_b], [pexels], tmp_path, llm)
+
+    assert scene_a.asset_source == "pexels"
+    assert scene_b.asset_source == "pexels"
+    assert len(llm.vision_calls) == 1  # scene_b's identical candidate reused scene_a's cached evaluation
 
 
 def test_among_multiple_passing_candidates_the_highest_vision_score_is_selected(tmp_path, monkeypatch):

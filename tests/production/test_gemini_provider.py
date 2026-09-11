@@ -18,10 +18,13 @@ import pytest
 
 from scripts.production.providers.llm import (
     DEFAULT_GEMINI_MODEL,
+    GEMINI_MAX_RETRIES,
     GeminiPingError,
     GeminiProvider,
     ScriptGenerationError,
     VisionEvaluationError,
+    _extract_retry_after_seconds,
+    _is_rate_limited,
 )
 
 
@@ -230,3 +233,160 @@ def test_ping_and_generate_script_errors_are_distinct_types():
 
     assert not issubclass(GeminiPingError, ScriptGenerationError)
     assert not issubclass(ScriptGenerationError, GeminiPingError)
+
+
+# ---------------------------------------------------------------------------
+# 429 / rate-limit resilience -- the incident this covers: GitHub Actions hit
+# a real "Quota exceeded ... generate_content_free_tier_requests, limit: 20"
+# HTTP 429 mid-run. No real SDK/network involved below: a plain fake
+# exception with `.code`/`.response`/`.details` stands in for
+# google.genai.errors.ClientError, since that duck-typed shape is all
+# _is_rate_limited/_extract_retry_after_seconds/_call_with_retry actually
+# look at (see providers/llm.py).
+# ---------------------------------------------------------------------------
+
+
+class _FakeHeaders(dict):
+    def get(self, key, default=None):  # case-insensitive like real HTTP headers
+        for k, v in self.items():
+            if k.lower() == key.lower():
+                return v
+        return default
+
+
+class _FakeHttpResponse:
+    def __init__(self, headers: dict | None = None):
+        self.headers = _FakeHeaders(headers or {})
+
+
+class _FakeRateLimitError(Exception):
+    def __init__(self, *, retry_after_header: str | None = None, retry_delay_detail: str | None = None):
+        super().__init__("429 RESOURCE_EXHAUSTED")
+        self.code = 429
+        self.response = _FakeHttpResponse({"Retry-After": retry_after_header}) if retry_after_header else None
+        self.details = (
+            {"error": {"code": 429, "details": [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": retry_delay_detail}]}}
+            if retry_delay_detail
+            else None
+        )
+
+
+class _FlakyInteractions:
+    """create() raises the given exceptions in order, then finally succeeds."""
+
+    def __init__(self, exceptions_then_success: list[Exception], output_text: str = "OK") -> None:
+        self._to_raise = list(exceptions_then_success)
+        self._output_text = output_text
+        self.call_count = 0
+
+    def create(self, **kwargs):
+        self.call_count += 1
+        if self._to_raise:
+            raise self._to_raise.pop(0)
+        return SimpleNamespace(output_text=self._output_text, status="completed", errors=[])
+
+
+def test_is_rate_limited_true_for_code_429():
+    assert _is_rate_limited(_FakeRateLimitError()) is True
+
+
+def test_is_rate_limited_false_for_other_errors():
+    assert _is_rate_limited(ValueError("boom")) is False
+    assert _is_rate_limited(GeminiPingError("no output")) is False
+
+
+def test_extract_retry_after_seconds_from_http_header():
+    exc = _FakeRateLimitError(retry_after_header="42")
+    assert _extract_retry_after_seconds(exc) == 42.0
+
+
+def test_extract_retry_after_seconds_from_retry_info_detail():
+    exc = _FakeRateLimitError(retry_delay_detail="42s")
+    assert _extract_retry_after_seconds(exc) == 42.0
+
+
+def test_extract_retry_after_seconds_returns_none_when_absent():
+    assert _extract_retry_after_seconds(_FakeRateLimitError()) is None
+
+
+def test_generate_script_retries_on_429_then_succeeds(monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr("scripts.production.providers.llm.time.sleep", lambda s: sleeps.append(s))
+
+    interactions = _FlakyInteractions([_FakeRateLimitError(), _FakeRateLimitError()], output_text='{"title": "T"}')
+    provider = _provider(interactions)
+
+    result = provider.generate_script("prompt")
+
+    assert result == '{"title": "T"}'
+    assert interactions.call_count == 3  # 2 failures + 1 success
+    assert len(sleeps) == 2
+
+
+def test_generate_script_respects_retry_after_header(monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr("scripts.production.providers.llm.time.sleep", lambda s: sleeps.append(s))
+
+    interactions = _FlakyInteractions([_FakeRateLimitError(retry_after_header="42")], output_text='{"title": "T"}')
+    provider = _provider(interactions)
+
+    provider.generate_script("prompt")
+
+    assert len(sleeps) == 1
+    # Honors the server's requested delay (plus jitter), not a shorter
+    # exponential-backoff guess.
+    assert 42.0 <= sleeps[0] <= 42.0 * 1.25 + 0.01
+
+
+def test_generate_script_gives_up_after_max_retries_and_raises(monkeypatch):
+    monkeypatch.setattr("scripts.production.providers.llm.time.sleep", lambda s: None)
+
+    # One more failure than the retry budget allows.
+    interactions = _FlakyInteractions([_FakeRateLimitError() for _ in range(GEMINI_MAX_RETRIES + 1)])
+    provider = _provider(interactions)
+
+    with pytest.raises(Exception) as exc_info:
+        provider.generate_script("prompt")
+
+    assert _is_rate_limited(exc_info.value)
+    assert interactions.call_count == GEMINI_MAX_RETRIES + 1
+
+
+def test_generate_script_does_not_retry_non_rate_limit_errors(monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr("scripts.production.providers.llm.time.sleep", lambda s: sleeps.append(s))
+
+    class _Boom:
+        def create(self, **kwargs):
+            raise ValueError("not a rate limit error")
+
+    provider = _provider(_Boom())
+
+    with pytest.raises(ValueError):
+        provider.generate_script("prompt")
+
+    assert sleeps == []
+
+
+def test_rate_limit_retry_logs_the_required_message(monkeypatch, caplog):
+    monkeypatch.setattr("scripts.production.providers.llm.time.sleep", lambda s: None)
+    interactions = _FlakyInteractions([_FakeRateLimitError()], output_text='{"title": "T"}')
+    provider = _provider(interactions)
+
+    with caplog.at_level("WARNING"):
+        provider.generate_script("prompt")
+
+    assert any("Gemini rate limited, retrying in" in record.message for record in caplog.records)
+    # Never logs anything secret (API key, request body, etc.) alongside it.
+    assert "unused-with-fake-client" not in caplog.text
+
+
+def test_evaluate_visual_candidate_also_retries_on_429(monkeypatch):
+    monkeypatch.setattr("scripts.production.providers.llm.time.sleep", lambda s: None)
+    interactions = _FlakyInteractions([_FakeRateLimitError()], output_text='{"computer_domain": true}')
+    provider = _provider(interactions)
+
+    result = provider.evaluate_visual_candidate(b"bytes", "image/jpeg", "prompt")
+
+    assert result == '{"computer_domain": true}'
+    assert interactions.call_count == 2

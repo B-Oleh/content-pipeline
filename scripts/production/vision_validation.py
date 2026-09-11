@@ -46,11 +46,14 @@ CONTENT_DOMAIN_DESCRIPTION = "PC gaming, gaming hardware, computer components, g
 # (see asset_acquisition.py) rather than using the best-of-a-bad-lot result.
 VISION_RELEVANCE_THRESHOLD = 70
 
-# Only the top few metadata-scored candidates are ever sent to Vision, to
+# Only the final 2-3 metadata-scored candidates are ever sent to Vision, to
 # keep the number of Gemini calls per scene small (see task's "avoid using
-# Gemini Vision on excessive candidates" requirement) -- metadata scoring
-# already did the cheap first-pass ranking in visual_relevance.py.
-SHORTLIST_SIZE = 3
+# Gemini Vision on excessive candidates" requirement, and the follow-up
+# "only call Vision for the final 2-3 candidates per scene" -- kept at the
+# low end of that range after a real run hit Gemini's free-tier request
+# quota) -- metadata scoring already did the cheap, free, deterministic
+# first-pass ranking/dedup in visual_relevance.py / asset_acquisition.py.
+SHORTLIST_SIZE = 2
 
 THUMBNAIL_TIMEOUT_SECONDS = 15.0
 DEFAULT_THUMBNAIL_MIME_TYPE = "image/jpeg"
@@ -145,8 +148,24 @@ def evaluate_candidate(provider: LlmProvider, image_bytes: bytes, mime_type: str
     )
 
 
+def _vision_cache_key(candidate: ScoredCandidate, scene: Scene) -> tuple[str, str, Optional[str], str]:
+    """Identifies a Vision call by everything that determines its answer:
+    the exact image (thumbnail_url) plus the exact prompt context
+    (narration, on-screen text, query) -- see build_vision_prompt(). Never
+    keyed on thumbnail_url alone across different scenes: the same image
+    can genuinely be relevant to one scene's narration and not another's,
+    so reusing a judgment across different context would silently change
+    the output quality rules this module exists to enforce.
+    """
+    return (candidate.asset.thumbnail_url or "", scene.narration_line, scene.on_screen_text, candidate.query)
+
+
 def select_vision_validated_candidate(
-    provider: LlmProvider, shortlisted: list[ScoredCandidate], scene: Scene
+    provider: LlmProvider,
+    shortlisted: list[ScoredCandidate],
+    scene: Scene,
+    *,
+    cache: Optional[dict[tuple[str, str, Optional[str], str], VisionEvaluation]] = None,
 ) -> Optional[ScoredCandidate]:
     """Vision makes the final semantic call; `shortlisted` is assumed
     already ordered best-metadata-score-first (see asset_acquisition.py),
@@ -158,6 +177,15 @@ def select_vision_validated_candidate(
     the HIGHEST scene_relevance_score is returned -- e.g. a 72 does not win
     over a 94 just because it was checked first.
 
+    `cache` (created once per acquire_assets() run and passed in by the
+    caller so it persists across scenes -- see asset_acquisition.py) avoids
+    ever sending the exact same thumbnail+context to Vision twice within
+    one run: asset_acquisition.py's own metadata-stage dedup already
+    collapses most duplicate candidates before they ever reach this
+    function (see its _dedupe_candidates()), so this is a second,
+    defense-in-depth layer for the rarer case of two otherwise-distinct
+    candidates sharing one CDN thumbnail URL.
+
     Returns None if every shortlisted candidate is rejected (by Vision, or
     because no thumbnail was available to evaluate at all). A rejected
     candidate is NEVER returned here in any form -- callers must not reuse
@@ -166,6 +194,8 @@ def select_vision_validated_candidate(
     asset_acquisition.py, which renders a plain/flat information card with
     no asset at all when this returns None.
     """
+    if cache is None:
+        cache = {}
     approved: list[tuple[ScoredCandidate, VisionEvaluation]] = []
 
     for candidate in shortlisted:
@@ -173,12 +203,20 @@ def select_vision_validated_candidate(
         if not thumbnail_url:
             logger.warning("No thumbnail URL for candidate %s -- cannot Vision-validate, rejecting", candidate.asset.page_url)
             continue
-        try:
-            image_bytes, mime_type = fetch_thumbnail_bytes(thumbnail_url)
-            evaluation = evaluate_candidate(provider, image_bytes, mime_type, scene, candidate.query)
-        except Exception as exc:  # noqa: BLE001 -- one candidate's Vision failure must not abort the scene's search
-            logger.warning("Vision evaluation failed for %s: %s", candidate.asset.page_url, exc)
-            continue
+
+        cache_key = _vision_cache_key(candidate, scene)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            logger.info("Reusing cached Vision evaluation for %s -- already evaluated this exact thumbnail+context this run", candidate.asset.page_url)
+            evaluation = cached
+        else:
+            try:
+                image_bytes, mime_type = fetch_thumbnail_bytes(thumbnail_url)
+                evaluation = evaluate_candidate(provider, image_bytes, mime_type, scene, candidate.query)
+            except Exception as exc:  # noqa: BLE001 -- one candidate's Vision failure must not abort the scene's search
+                logger.warning("Vision evaluation failed for %s: %s", candidate.asset.page_url, exc)
+                continue
+            cache[cache_key] = evaluation
 
         if evaluation.passed:
             logger.info(

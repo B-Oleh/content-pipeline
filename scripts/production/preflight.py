@@ -37,16 +37,26 @@ class PreflightError(RuntimeError):
 
 
 def _check_gemini(api_key: str | None) -> PreflightCheck:
-    if not api_key:
-        return PreflightCheck("gemini", False, "GEMINI_API_KEY is not set")
-    try:
-        from scripts.production.providers.llm import GeminiProvider
+    """Deliberately does NOT call the Gemini API (unlike the Pexels/Pixabay/
+    Telegram checks below, which do a real live probe).
 
-        GeminiProvider(api_key).ping()
-        return PreflightCheck("gemini", True, "Gemini responded successfully")
-    except Exception as exc:  # noqa: BLE001 -- isolated preflight boundary, see module docstring
-        message = _safe_error_message(exc)
-        return PreflightCheck("gemini", False, f"Gemini request failed ({message})")
+    script_agent.generate_script() makes a real Gemini call moments after
+    preflight passes -- a separate `ping()` probe here would burn one of
+    Gemini's free-tier quota units for nothing before the pipeline has done
+    any real work, which is exactly what pushed a real run over Gemini's
+    20-request free-tier limit (HTTP 429 "Quota exceeded ...
+    generate_content_free_tier_requests"). The first real
+    generate_script() call now serves as the actual connectivity test
+    instead, and it has its own 429 retry/backoff (see
+    providers/llm.py::_call_with_retry) -- a genuine auth/connectivity
+    problem still surfaces immediately and clearly there, just one stage
+    later than before.
+    """
+    if not api_key or not api_key.strip():
+        return PreflightCheck("gemini", False, "GEMINI_API_KEY is not set")
+    return PreflightCheck(
+        "gemini", True, "Gemini API key is present (connectivity is verified by the first real request, not preflight)"
+    )
 
 
 def _check_pexels(api_key: str | None) -> PreflightCheck:
@@ -156,7 +166,7 @@ def main() -> None:
     except PreflightError as exc:
         print(f"PREFLIGHT FAILED: {exc}")
         sys.exit(1)
-    print("Preflight OK: Gemini, Pexels, Pixabay, and Telegram are all reachable.")
+    print("Preflight OK: Gemini API key present; Pexels, Pixabay, and Telegram are all reachable.")
 
 
 if __name__ == "__main__":

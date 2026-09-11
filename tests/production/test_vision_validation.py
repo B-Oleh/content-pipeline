@@ -42,7 +42,18 @@ class _FakeLlmProvider(LlmProvider):
         return self._responses.pop(0)
 
 
-def _asset(page_url: str = "https://pexels.com/video/x-1", thumbnail_url: str = "https://cdn.example.com/thumb.jpg") -> AssetResult:
+_UNSET = object()
+
+
+def _asset(page_url: str = "https://pexels.com/video/x-1", thumbnail_url=_UNSET) -> AssetResult:
+    # Defaults to a thumbnail derived from page_url (unique per distinct
+    # asset, like real Pexels/Pixabay CDN URLs are) rather than one fixed
+    # string shared by every test asset -- otherwise two genuinely
+    # different candidates would collide on vision_validation.py's
+    # thumbnail+context cache key and the cache would (correctly, given
+    # identical inputs) return one candidate's cached evaluation for
+    # another, unrelated one.
+    slug = page_url.rsplit("/", 1)[-1]
     return AssetResult(
         provider="pexels",
         page_url=page_url,
@@ -52,7 +63,7 @@ def _asset(page_url: str = "https://pexels.com/video/x-1", thumbnail_url: str = 
         is_video=True,
         duration_seconds=10.0,
         attribution="Video by Someone",
-        thumbnail_url=thumbnail_url,
+        thumbnail_url=f"https://cdn.example.com/{slug}_thumb.jpg" if thumbnail_url is _UNSET else thumbnail_url,
     )
 
 
