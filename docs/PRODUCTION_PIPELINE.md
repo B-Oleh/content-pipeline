@@ -183,19 +183,37 @@ is available, instead of collapsing every failure into one indistinguishable str
 
 **Gemini quota resilience.** `providers/llm.py::_call_with_retry()` wraps every
 `interactions.create(...)` call (`generate_script()`, `evaluate_visual_candidate()`, and `ping()`)
-and retries ONLY on an HTTP 429 (`_is_rate_limited()` -- duck-typed on the SDK's `ClientError.code
-== 429`, not a specific caught exception class, so a fake object with that attribute is enough to
-exercise it in tests). Up to `GEMINI_MAX_RETRIES` (3) retries, honoring the server's own
-`Retry-After` header or Google's structured `RetryInfo.retryDelay` detail when present
-(`_extract_retry_after_seconds()`), otherwise exponential backoff (`GEMINI_BASE_RETRY_DELAY_SECONDS`
-doubling each attempt, capped at `GEMINI_MAX_RETRY_DELAY_SECONDS`) plus up to 25% jitter -- logged
-as `"Gemini rate limited, retrying in N seconds"` (never including request/response bodies or the
-API key). Any other exception (auth failure, malformed response, a non-429 HTTP error) is not
-retried and propagates immediately, unchanged from before. This turns one transient rate-limit hit
-into a short wait instead of an immediate pipeline failure; it does not change what happens once
-the retry budget is exhausted -- that still raises loudly (see the per-caller exception types
-above), except inside `vision_validation.py`'s per-candidate try/except, where an exhausted retry on
-one candidate is already treated as a rejection of that candidate, not a whole-scene failure (see
+and retries ONLY on an HTTP 429 (`_is_rate_limited()`). Up to `GEMINI_MAX_RETRIES` (3) retries,
+honoring the server's own `Retry-After` header, Google's structured `RetryInfo.retryDelay` detail,
+or (as a sanitized last resort) Gemini's own "Please retry in N.NNNNNNNNNs." sentence parsed
+straight out of the error message, whichever is present (`_extract_retry_after_seconds()`) --
+otherwise exponential backoff (`GEMINI_BASE_RETRY_DELAY_SECONDS` doubling each attempt, capped at
+`GEMINI_MAX_RETRY_DELAY_SECONDS`) plus up to 25% jitter -- logged as `"Gemini rate limited, retrying
+in N seconds"` (never including request/response bodies or the API key). Any other exception (auth
+failure, malformed response, a non-429 HTTP error) is not retried and propagates immediately,
+unchanged from before.
+
+`_is_rate_limited()` checks, in priority order: (1) the installed SDK's own
+`google.genai._gaos.lib.compat_errors.RateLimitError` type, imported lazily and best-effort; (2)
+`status_code == 429`; (3) `code == 429` (an older SDK shape, kept for compatibility); (4) a nested
+`response.status_code` or a parsed error body/detail whose own `code` field is 429; (5) a sanitized
+fallback match on `"error code: 429"` / `"too_many_requests"` in the error's own message text. This
+priority list exists because a real GitHub Actions run proved the original single `code == 429`
+check silently never matches the exception the installed google-genai SDK (2.22.0) actually raises
+for a 429: `RateLimitError` (a subclass of `APIStatusError`) carries `status_code`, not `code`, and
+has no `.code` attribute at all -- so the retry path never engaged and the run failed immediately on
+the first rate-limit hit. `_extract_retry_after_seconds()` follows the same "structured first,
+sanitized text last" philosophy: it checks `Retry-After` and `RetryInfo.retryDelay` on whichever of
+`.details`/`.body` the installed SDK happens to populate, and only if neither is present parses the
+delay directly out of the error's own message text (supports decimal seconds, e.g. "Please retry in
+24.354420322s." -> `24.354420322`) -- exactly the shape Gemini's real quota-exceeded message uses,
+since this SDK version does not expose that delay as a separate structured field at all.
+
+This turns one transient rate-limit hit into a short wait instead of an immediate pipeline failure;
+it does not change what happens once the retry budget is exhausted -- that still raises loudly (see
+the per-caller exception types above), except inside `vision_validation.py`'s per-candidate
+try/except, where an exhausted retry on one candidate is already treated as a rejection of that
+candidate, not a whole-scene failure (see
 "Visuals" below).
 
 **Fabrication guard.** The prompt instructs Gemini never to state a specific FPS number, price,

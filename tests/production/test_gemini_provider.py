@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from scripts.production.providers.llm import (
@@ -25,6 +26,15 @@ from scripts.production.providers.llm import (
     VisionEvaluationError,
     _extract_retry_after_seconds,
     _is_rate_limited,
+)
+
+try:
+    from google.genai._gaos.lib.compat_errors import RateLimitError as _RealRateLimitError
+except ImportError:  # pragma: no cover -- exercised only when the real SDK is installed
+    _RealRateLimitError = None
+
+requires_real_sdk_rate_limit_error = pytest.mark.skipif(
+    _RealRateLimitError is None, reason="google.genai._gaos.lib.compat_errors.RateLimitError is not importable in this environment"
 )
 
 
@@ -390,3 +400,101 @@ def test_evaluate_visual_candidate_also_retries_on_429(monkeypatch):
 
     assert result == '{"computer_domain": true}'
     assert interactions.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Real production incident: a GitHub Actions run hit a genuine 429 and the
+# retry logic above did NOT fire at all. The actual exception the installed
+# google-genai SDK (2.22.0) raises for a 429 is
+# google.genai._gaos.lib.compat_errors.RateLimitError, constructed below
+# exactly as the SDK itself would (real httpx.Request/httpx.Response, real
+# parsed error body) -- not a hand-rolled fake. It has a `status_code`
+# attribute (inherited from APIStatusError), NOT a `.code` attribute at
+# all, which is exactly why the original `getattr(exc, "code", None) ==
+# 429` check silently never matched it. See providers/llm.py's
+# _is_rate_limited docstring for the fix and its priority order.
+# ---------------------------------------------------------------------------
+
+# Exact production message shape (a real Gemini free-tier quota response),
+# including the literal "Please retry in 24.354420322s." sentence.
+_REAL_QUOTA_MESSAGE = (
+    "Quota exceeded for quota metric 'Generate Content API requests' and limit "
+    "'GenerateContent request limit' of service 'generativelanguage.googleapis.com' "
+    "for consumer 'project_number:123456789'. Please retry in 24.354420322s."
+)
+
+
+def _real_rate_limit_error(message: str = _REAL_QUOTA_MESSAGE) -> Exception:
+    """Builds the exact exception type/shape the installed google-genai SDK
+    raises for a 429 -- a real httpx.Request/httpx.Response and the SDK's
+    own composed message, not a hand-rolled stand-in."""
+    body = {"error": {"code": 429, "message": message, "status": "RESOURCE_EXHAUSTED"}}
+    request = httpx.Request("POST", "https://generativelanguage.googleapis.com/v1/interactions")
+    response = httpx.Response(429, request=request, json=body)
+    return _RealRateLimitError(f"Error code: 429 - {body}", response=response, body=body)
+
+
+@requires_real_sdk_rate_limit_error
+def test_real_sdk_rate_limit_error_has_no_code_attribute_documenting_the_original_bug():
+    """Documents the actual installed SDK shape: RateLimitError has
+    `status_code` (429) but genuinely no `code` attribute -- proving why
+    the old `.code == 429` check could never have worked against it."""
+    exc = _real_rate_limit_error()
+
+    assert exc.status_code == 429
+    assert not hasattr(exc, "code")
+    assert isinstance(exc.body, dict)
+
+
+@requires_real_sdk_rate_limit_error
+def test_is_rate_limited_recognizes_the_real_sdk_exception_type():
+    assert _is_rate_limited(_real_rate_limit_error()) is True
+
+
+@requires_real_sdk_rate_limit_error
+def test_extract_retry_after_seconds_parses_the_real_quota_message():
+    delay = _extract_retry_after_seconds(_real_rate_limit_error())
+    assert delay is not None
+    assert delay == pytest.approx(24.354420322, abs=1e-6)
+
+
+@requires_real_sdk_rate_limit_error
+def test_generate_script_retries_on_the_real_sdk_rate_limit_error_then_succeeds(monkeypatch):
+    """The end-to-end regression test: first call raises the real-style 429,
+    _is_rate_limited recognizes it, a retry delay is extracted from the
+    message, the sleep/backoff path is invoked, the second call succeeds,
+    and generate_script() returns the successful result."""
+    sleeps: list[float] = []
+    monkeypatch.setattr("scripts.production.providers.llm.time.sleep", lambda s: sleeps.append(s))
+
+    interactions = _FlakyInteractions([_real_rate_limit_error()], output_text='{"title": "Recovered"}')
+    provider = _provider(interactions)
+
+    result = provider.generate_script("prompt")
+
+    assert result == '{"title": "Recovered"}'
+    assert interactions.call_count == 2  # 1 failure (the real 429) + 1 success
+    assert len(sleeps) == 1
+    assert sleeps[0] == pytest.approx(24.354420322, rel=0.30)  # allows for jitter, still well under the 60s cap
+    assert sleeps[0] <= 60.0
+
+
+def test_is_rate_limited_regression_matches_the_exact_production_error_text():
+    """Regression guard for the exact strings from the real incident report
+    -- proven here with a bare exception carrying ONLY a message (no
+    `.code`, `.status_code`, `.response`, `.body`, or `.details` at all),
+    so this specifically exercises the sanitized text-fallback tier, not
+    any structured attribute."""
+
+    class _BareException(Exception):
+        pass
+
+    exc = _BareException(
+        "Error code: 429 - {'error': {'code': 429, 'status': 'too_many_requests', "
+        "'message': \"Quota exceeded... Please retry in 24.354420322s.\"}}"
+    )
+
+    assert _is_rate_limited(exc) is True
+    delay = _extract_retry_after_seconds(exc)
+    assert delay is not None
+    assert delay == pytest.approx(24.354420322, abs=1e-6)

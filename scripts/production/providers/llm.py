@@ -158,26 +158,112 @@ _PING_PROMPT = "Reply exactly with OK"
 _INTERACTION_FAILURE_HINT = "did not complete successfully"
 
 
-def _is_rate_limited(exc: Exception) -> bool:
-    """True for an HTTP 429 from the google-genai SDK.
+# Matches Gemini's "Please retry in 24.354420322s." phrasing (decimal
+# seconds, always followed by "s" then end-of-sentence) -- the sanitized,
+# last-resort fallback signal for both _is_rate_limited() and
+# _extract_retry_after_seconds() when no structured field carries the same
+# information. See their docstrings for why this is needed at all: the
+# real, installed google-genai SDK (2.22.0) raises
+# google.genai._gaos.lib.compat_errors.RateLimitError for a 429, which has
+# neither a `.code` attribute nor Google's older RetryInfo detail shape --
+# the retry delay only exists as this sentence inside the error's own
+# message text.
+_RETRY_IN_SECONDS_PATTERN = re.compile(r"retry in\s+([0-9]+(?:\.[0-9]+)?)\s*s\b", re.IGNORECASE)
 
-    Duck-typed on `.code` rather than importing/isinstance-checking
-    `google.genai.errors.ClientError` -- the SDK raises that for every 4xx
-    response with `.code` set to the HTTP status, so checking the
-    attribute directly is exactly as precise, and it lets tests exercise
-    this with a plain fake exception (no real httpx/requests Response
-    needed to construct a genuine SDK error -- see
-    tests/production/test_gemini_provider.py).
+
+def _find_nested_error_dict(payload: Any) -> Optional[dict]:
+    """Returns the innermost `{"code": ..., "message": ..., "status": ...}`
+    error dict out of a parsed Gemini error body, whether it arrived as
+    `{"error": {...}}` (the raw JSON shape) or already unwrapped."""
+    if not isinstance(payload, dict):
+        return None
+    inner = payload.get("error", payload)
+    return inner if isinstance(inner, dict) else None
+
+
+def _extract_message_text(exc: Exception) -> str:
+    """The most specific human-readable error text available: the nested
+    `body["error"]["message"]` Gemini itself wrote (if the SDK parsed a
+    structured body), else the exception's own `.message`, else `str(exc)`.
+    Used only for the sanitized last-resort fallback checks below -- never
+    logged in full, only searched for a known-safe substring/pattern.
     """
-    return getattr(exc, "code", None) == 429
+    error_dict = _find_nested_error_dict(getattr(exc, "body", None)) or _find_nested_error_dict(getattr(exc, "details", None))
+    if error_dict:
+        message = error_dict.get("message")
+        if isinstance(message, str) and message:
+            return message
+    message = getattr(exc, "message", None)
+    if isinstance(message, str) and message:
+        return message
+    return str(exc)
+
+
+def _is_rate_limited(exc: Exception) -> bool:
+    """True for Gemini's HTTP 429 rate-limit error.
+
+    A real GitHub Actions run proved the original `getattr(exc, "code",
+    None) == 429` check silently never matches: the installed google-genai
+    SDK (2.22.0) raises `google.genai._gaos.lib.compat_errors.RateLimitError`
+    for a 429, which has a `status_code` attribute (inherited from
+    `APIStatusError`), NOT a `code` attribute at all. Checked in priority
+    order, most specific/reliable first, so this keeps working even if a
+    future SDK version changes which of these happens to be populated:
+
+    1. The real SDK's own `RateLimitError` type, if importable (import is
+       lazy and best-effort -- this module must stay importable even if
+       that internal SDK path ever moves).
+    2. `status_code == 429` (the current SDK's `APIStatusError` shape).
+    3. `code == 429` (the older `google.genai.errors.ClientError` shape --
+       kept for compatibility, not because it's what's installed now).
+    4. A nested `response.status_code` or a parsed error body/detail whose
+       own `code` field is 429.
+    5. Sanitized fallback: "Error code: 429" or "too_many_requests"
+       (case-insensitive) in the error's own message text -- only reached
+       when none of the structured signals above matched.
+    """
+    try:
+        from google.genai._gaos.lib.compat_errors import RateLimitError as _RealRateLimitError
+    except ImportError:
+        _RealRateLimitError = None
+    if _RealRateLimitError is not None and isinstance(exc, _RealRateLimitError):
+        return True
+
+    if getattr(exc, "status_code", None) == 429:
+        return True
+
+    if getattr(exc, "code", None) == 429:
+        return True
+
+    response = getattr(exc, "response", None)
+    if getattr(response, "status_code", None) == 429:
+        return True
+    for attr_name in ("body", "details"):
+        error_dict = _find_nested_error_dict(getattr(exc, attr_name, None))
+        if error_dict is not None and error_dict.get("code") == 429:
+            return True
+
+    text = _extract_message_text(exc).lower()
+    return "error code: 429" in text or "too_many_requests" in text
 
 
 def _extract_retry_after_seconds(exc: Exception) -> Optional[float]:
-    """Best-effort read of a server-provided retry delay: the standard
-    HTTP `Retry-After` response header first, then Google's structured
-    `RetryInfo` error detail (`{"retryDelay": "42s"}`) if present. Returns
-    None if neither is available/parseable, so the caller falls back to
-    its own exponential backoff instead of guessing.
+    """Best-effort read of a server-provided retry delay, in priority order:
+
+    1. The standard HTTP `Retry-After` response header, if the SDK
+       attached a real response object.
+    2. Google's structured `RetryInfo` error detail
+       (`{"retryDelay": "42s"}`), wherever this SDK version happens to
+       expose the parsed error body (`.details` on the older
+       `google.genai.errors.ClientError`, `.body` on the current
+       `google.genai._gaos.lib.compat_errors.RateLimitError`).
+    3. Sanitized fallback: Gemini's own "Please retry in 24.354420322s."
+       phrasing, parsed directly out of the error message text (supports
+       decimal seconds) -- only reached when neither structured signal
+       above was present/parseable.
+
+    Returns None if nothing above is available, so the caller falls back
+    to its own exponential backoff instead of guessing.
     """
     response = getattr(exc, "response", None)
     headers = getattr(response, "headers", None)
@@ -192,10 +278,11 @@ def _extract_retry_after_seconds(exc: Exception) -> Optional[float]:
             except (TypeError, ValueError):
                 pass
 
-    details = getattr(exc, "details", None)
-    error_body = details.get("error", details) if isinstance(details, dict) else None
-    if isinstance(error_body, dict):
-        for item in error_body.get("details") or []:
+    for attr_name in ("details", "body"):
+        error_dict = _find_nested_error_dict(getattr(exc, attr_name, None))
+        if error_dict is None:
+            continue
+        for item in error_dict.get("details") or []:
             if not isinstance(item, dict):
                 continue
             retry_delay = item.get("retryDelay")
@@ -204,6 +291,14 @@ def _extract_retry_after_seconds(exc: Exception) -> Optional[float]:
                     return float(retry_delay[:-1])
                 except ValueError:
                     continue
+
+    match = _RETRY_IN_SECONDS_PATTERN.search(_extract_message_text(exc))
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            pass
+
     return None
 
 
