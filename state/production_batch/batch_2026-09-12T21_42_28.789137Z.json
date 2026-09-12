@@ -1,0 +1,142 @@
+{
+  "batch_id": "2026-09-12T21:42:28.789137Z",
+  "generated_at": "2026-09-12T22:22:08.012349Z",
+  "batch_size": 3,
+  "attempts": [
+    {
+      "attempt_number": 1,
+      "candidate_id": "fixture:gpu-buying-myths",
+      "topic": "3 GPU buying myths that waste your money",
+      "candidate_number": null,
+      "status": "failed_visual",
+      "failure_reason": "[OK] valid_scene_durations; [FAILED] real_media_coverage -- 15.408/44.472s (34.6%); required 80%; [FAILED] info_card_streak -- 3 consecutive; maximum 1",
+      "content_brief": {
+        "target_audience": "PC gamers and custom system builders planning a graphics card upgrade on a budget.",
+        "viewer_pain": "Wasting money on overhyped GPU specs and marketing buzzwords that deliver zero noticeable gaming performance gains.",
+        "topic_angle": "Debunking entrenched hardware folklore to show how buyers accidentally sacrifice real framerates for paper specs.",
+        "hook_candidates": [
+          "Before you buy your next graphics card, stop falling for these money-wasting myths.",
+          "You might be about to waste your hardware budget on GPU features you will never use.",
+          "Stop blowing your PC budget on graphics card hype that does not give you more FPS."
+        ],
+        "selected_hook": "Before you buy your next graphics card, stop falling for these money-wasting myths.",
+        "hook_rationale": "It creates an immediate open loop targeted directly at viewers in the buying mindset, triggering loss aversion in the first two seconds."
+      },
+      "script": {
+        "topic": "3 GPU buying myths that waste your money",
+        "content_role": "hybrid",
+        "hook": "Before you buy your next graphics card, stop falling for these money-wasting myths.",
+        "narration": "Before you buy your next graphics card, stop falling for these money-wasting myths. First, assuming more video memory automatically means higher speed. Extra VRAM cannot compensate for a slow graphics processor. Second, paying huge price premiums for factory overclocked cards. You are usually spending extra money for gains you will never notice while playing. Third, buying a budget GPU just for ray tracing capabilities. Entry-level cards often suffer huge performance drops when heavy ray tracing is turned on. Always check independent gaming benchmarks for the core processor instead of trusting glossy box features and marketing hype.",
+        "scenes": [
+          {
+            "index": 0,
+            "narration_line": "Before you buy your next graphics card, stop falling for these money-wasting myths. First, assuming more video memory automatically means higher speed. Extra VRAM cannot compensate for a slow graphics processor.",
+            "on_screen_text": "Myth 1: More VRAM = Faster",
+            "visual_search_queries": [
+              "close up of graphics card circuit board VRAM chips",
+              "pc gamer looking at computer monitor display",
+              "graphics settings menu inside video game on monitor",
+              "hands holding desktop computer graphics card component"
+            ],
+            "asset_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_1/assets/scene_00.mp4",
+            "asset_is_video": true,
+            "asset_source": "pexels",
+            "asset_url": "https://www.pexels.com/photo/close-up-of-geforce-rtx-graphics-card-in-computer-34552801/",
+            "media_accepted": true,
+            "asset_attribution": "Photo by Matheus Bertelli on Pexels (relevance 0.24, vision score=75: honest but not exact match)",
+            "production_mode": "hybrid_visual",
+            "audio_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_1/audio/scene_00.mp3",
+            "duration_seconds": 15.408
+          },
+          {
+            "index": 1,
+            "narration_line": "Second, paying huge price premiums for factory overclocked cards. You are usually spending extra money for gains you will never notice while playing.",
+            "on_screen_text": "Myth 2: Pricey Factory Overclocks",
+            "visual_search_queries": [
+              "spinning fans on dual fan desktop graphics card",
+              "person holding retail computer component box",
+              "rgb illuminated gaming desktop pc chassis interior",
+              "overclocking utility software displayed on monitor screen"
+            ],
+            "asset_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_1/assets/scene_01.mp4",
+            "asset_is_video": true,
+            "asset_source": "info_card",
+            "asset_url": null,
+            "media_accepted": false,
+            "asset_attribution": "Generated information card (no shortlisted candidate passed Gemini Vision's relevance/domain check)",
+            "production_mode": "info_card",
+            "audio_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_1/audio/scene_01.mp3",
+            "duration_seconds": 10.2
+          },
+          {
+            "index": 2,
+            "narration_line": "Third, buying a budget GPU just for ray tracing capabilities. Entry-level cards often suffer huge performance drops when heavy ray tracing is turned on.",
+            "on_screen_text": "Myth 3: Ray Tracing on Budget Cards",
+            "visual_search_queries": [
+              "gamer playing realistic action video game on computer monitor",
+              "person sitting at dark desk setup with glowing RGB lights",
+              "graphics card inside custom water cooled pc tower",
+              "close up shot of computer monitor showing video game graphics"
+            ],
+            "asset_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_1/assets/scene_02.mp4",
+            "asset_is_video": true,
+            "asset_source": "info_card",
+            "asset_url": null,
+            "media_accepted": false,
+            "asset_attribution": "Generated information card (no shortlisted candidate passed Gemini Vision's relevance/domain check)",
+            "production_mode": "info_card",
+            "audio_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_1/audio/scene_02.mp3",
+            "duration_seconds": 11.016
+          },
+          {
+            "index": 3,
+            "narration_line": "Always check independent gaming benchmarks for the core processor instead of trusting glossy box features and marketing hype.",
+            "on_screen_text": "Check Independent Benchmarks",
+            "visual_search_queries": [
+              "tech reviewer reading hardware benchmark graphs on laptop",
+              "person typing on mechanical keyboard at clean desk setup",
+              "computer screen displaying hardware comparison chart",
+              "hands placing graphics card into desktop computer motherboard"
+            ],
+            "asset_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_1/assets/scene_03.mp4",
+            "asset_is_video": true,
+            "asset_source": "info_card",
+            "asset_url": null,
+            "media_accepted": false,
+            "asset_attribution": "Generated information card (no shortlisted candidate passed Gemini Vision's relevance/domain check)",
+            "production_mode": "info_card",
+            "audio_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_1/audio/scene_03.mp3",
+            "duration_seconds": 7.848
+          }
+        ],
+        "title": "3 GPU Buying Myths That Waste Your Money",
+        "description": "Stop falling for marketing hype when upgrading your graphics card. Here are 3 common GPU myths that cost you money without improving performance.",
+        "evidence_references": [
+          "General hardware knowledge regarding GPU buying myths and marketing claims."
+        ],
+        "candidate_id": "fixture:gpu-buying-myths",
+        "overall_score": 5.98
+      },
+      "qa_passed": null,
+      "duration_seconds": 44.471999999999994,
+      "real_media_coverage": 0.3464651915812197,
+      "video_path": null
+    },
+    {
+      "attempt_number": 2,
+      "candidate_id": "eurogamer_rss:42c3edf56a",
+      "topic": "Nightdive confirms Thief Remastered's leaked new campaign, The Tarnished Mirror, with a November reveal date",
+      "candidate_number": null,
+      "status": "failed_exception",
+      "failure_reason": "RateLimitError: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.6-flash\\nPlease retry in 52.005702091s.', 'code': 'too_many_requests'}}",
+      "content_brief": null,
+      "script": null,
+      "qa_passed": null,
+      "duration_seconds": null,
+      "real_media_coverage": null,
+      "video_path": null
+    }
+  ],
+  "completed": [],
+  "blocker": "RateLimitError: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.6-flash\\nPlease retry in 52.005702091s.', 'code': 'too_many_requests'}}"
+}
