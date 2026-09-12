@@ -223,3 +223,5 @@ permissions" setting is needed for it specifically.
   govern adding dependencies or API integrations.
 - See [docs/BUSINESS_STRATEGY.md](docs/BUSINESS_STRATEGY.md) for the business model, revenue
   milestones, and content niche.
+
+Overnight batch: `python -m scripts.produce_batch` delivers up to three candidates for morning review; see [Batch mode](docs/BATCH_MODE.md).

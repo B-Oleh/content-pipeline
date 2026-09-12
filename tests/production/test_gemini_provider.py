@@ -498,3 +498,34 @@ def test_is_rate_limited_regression_matches_the_exact_production_error_text():
     delay = _extract_retry_after_seconds(exc)
     assert delay is not None
     assert delay == pytest.approx(24.354420322, abs=1e-6)
+
+
+def test_generate_content_brief_returns_text_and_uses_real_sdk_schema():
+    from google.genai.interactions import CreateModelInteraction, TextResponseFormat
+    from scripts.production.providers.llm import CONTENT_BRIEF_SCHEMA
+
+    interactions = _FakeInteractions(output_text='{"target_audience": "Gamers"}')
+    assert _provider(interactions).generate_content_brief("brief prompt") == interactions._output_text
+    call = interactions.calls[0]
+    assert call == {
+        "model": DEFAULT_GEMINI_MODEL, "input": "brief prompt",
+        "response_format": {"type": "text", "mime_type": "application/json", "schema": CONTENT_BRIEF_SCHEMA},
+    }
+    validated = CreateModelInteraction.model_validate(call)
+    assert isinstance(validated.response_format, TextResponseFormat)
+    assert validated.response_format.schema_ == CONTENT_BRIEF_SCHEMA
+    wire = validated.model_dump(by_alias=True, exclude_none=True)
+    assert wire["response_format"]["schema"] == CONTENT_BRIEF_SCHEMA
+    assert "schema_" not in wire["response_format"]
+
+
+def test_generate_content_brief_empty_response_fails():
+    with pytest.raises(ScriptGenerationError):
+        _provider(_FakeInteractions(output_text="")).generate_content_brief("prompt")
+
+
+def test_generate_content_brief_retries_rate_limit(monkeypatch):
+    monkeypatch.setattr("scripts.production.providers.llm.time.sleep", lambda _: None)
+    interactions = _FlakyInteractions([_FakeRateLimitError()], output_text="{}")
+    assert _provider(interactions).generate_content_brief("prompt") == "{}"
+    assert interactions.call_count == 2

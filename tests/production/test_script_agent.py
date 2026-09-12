@@ -91,3 +91,24 @@ def test_generate_script_fails_loudly_if_fabrication_survives_retry():
     with pytest.raises(ScriptGenerationError):
         generate_script(provider, _scored_candidate())
     assert len(provider.prompts) == 2
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_content_brief_is_in_initial_and_retry_prompt(retry):
+    from scripts.production.content_brief import ContentBrief
+
+    hook = json.loads(_clean_response())["hook"]
+    brief = ContentBrief("PC gamers", "GPU buying confusion", "Budget checks",
+                         [hook, "Check before buying."], hook, "Recognizable pain")
+    provider = _FakeLlmProvider(([_fabricated_response()] if retry else []) + [_clean_response()])
+    generate_script(provider, _scored_candidate(), content_brief=brief)
+    assert len(provider.prompts) == (2 if retry else 1)
+    for prompt in provider.prompts:
+        assert "Content brief (design to it):" in prompt
+        assert brief.selected_hook in prompt
+        assert brief.target_audience in prompt
+        assert "Your `hook` field MUST be the selected opening hook" in prompt
+        assert "Produce 4 to 6 scenes" in prompt
+        assert "NEVER state a specific FPS number" in prompt
+    if retry:
+        assert provider.prompts[1].startswith(provider.prompts[0])

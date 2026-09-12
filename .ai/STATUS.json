@@ -1,0 +1,10 @@
+{
+  "goal_status": "complete",
+  "phase": "done",
+  "implementer": "codex",
+  "reviewer": "claude",
+  "review": "pass",
+  "tests": "passed",
+  "needs_human_approval": false,
+  "blocker": null
+}

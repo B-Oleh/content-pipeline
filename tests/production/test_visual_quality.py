@@ -52,3 +52,25 @@ class VisualQualityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_media_coverage_fraction_matches_gate(tmp_path):
+    from scripts.production.visual_quality import media_coverage_fraction
+
+    asset = tmp_path / "clip.mp4"
+    asset.write_bytes(b"media")
+    scenes = [Scene(0, "PC", duration_seconds=8, asset_path=asset, asset_source="pixabay",
+                    production_mode="hybrid_visual", media_accepted=True),
+              Scene(1, "PC", duration_seconds=2, production_mode="info_card")]
+    assert media_coverage_fraction(scenes) == 0.8
+    assert check_visual_quality(scenes).details["real_media_coverage"] == "8.000/10.000s (80.0%); required 80%"
+    asset.write_bytes(b"")
+    assert media_coverage_fraction(scenes) == 0.0
+
+
+def test_media_coverage_fraction_empty_and_invalid_durations():
+    from scripts.production.visual_quality import media_coverage_fraction
+
+    assert media_coverage_fraction([]) == 0.0
+    for duration in [None, 0, -1, float("nan"), float("inf")]:
+        assert media_coverage_fraction([Scene(0, "PC", duration_seconds=duration)]) == 0.0

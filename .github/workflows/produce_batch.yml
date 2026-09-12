@@ -1,0 +1,101 @@
+name: Produce Video Batch (manual)
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: produce-video-batch
+  cancel-in-progress: false
+
+jobs:
+  produce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+      PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      # Presence-only preflight requirements; batch never uploads to YouTube.
+      YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+      YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+      YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Ensure ffmpeg and DejaVu font
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1 || [ ! -f /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf ]; then
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg fonts-dejavu-core
+          fi
+          ffmpeg -version
+          ffprobe -version
+
+      - name: Run automated test suite
+        run: python -m pytest -q
+
+      - name: Preflight
+        run: python -m scripts.production.preflight
+
+      - name: Run overnight batch
+        run: python -m scripts.produce_batch
+
+      - name: Upload batch diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: produce-batch-diagnostics-${{ github.run_number }}
+          path: |
+            data/production/
+            output/
+            logs/
+          retention-days: 3
+          if-no-files-found: warn
+
+      - name: Persist batch metadata
+        if: always()
+        env:
+          TARGET_BRANCH: ${{ github.ref_name }}
+        run: |
+          if [ -z "$(git status --porcelain --untracked-files=all -- state/production_batch/)" ]; then
+            exit 0
+          fi
+          # Guard existing files and changed/deleted paths, including untracked files.
+          python - <<'PY'
+          import subprocess
+          from pathlib import Path
+
+          root = Path("state/production_batch")
+          paths = list(root.rglob("*")) if root.exists() else []
+          changed = subprocess.check_output([
+              "git", "ls-files", "--modified", "--others", "--exclude-standard", "-z",
+              "--", "state/production_batch/",
+          ])
+          paths.extend(Path(name.decode()) for name in changed.split(b"\0") if name)
+          for path in paths:
+              if path.is_symlink() or (not path.is_dir() and path.suffix != ".json"):
+                  raise SystemExit(f"Refusing non-JSON batch state: {path}")
+          PY
+          git add state/production_batch/
+          if git diff --cached --quiet -- state/production_batch/; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(state): update production batch metadata" -- state/production_batch/
+          git push origin "HEAD:${TARGET_BRANCH}"

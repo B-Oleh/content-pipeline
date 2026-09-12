@@ -13,7 +13,10 @@ import json
 import random
 import re
 import time
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Callable, Optional, TypeVar, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from scripts.production.content_brief import ContentBrief
 
 from scripts.production.models import Scene, VideoScript
 from scripts.utils.logging_utils import get_logger
@@ -87,6 +90,10 @@ def find_fabrication_risks(text: str) -> list[str]:
 
 class LlmProvider:
     """Interface every LLM provider must implement."""
+
+    def generate_content_brief(self, prompt: str) -> str:
+        """Return the raw JSON response for a content brief."""
+        raise NotImplementedError
 
     def generate_script(self, prompt: str) -> str:
         """Return the raw text response for a fully-built prompt."""
@@ -381,6 +388,23 @@ class GeminiProvider(LlmProvider):
             raise ScriptGenerationError(_describe_incomplete_interaction(interaction))
         return text
 
+    def generate_content_brief(self, prompt: str) -> str:
+        interaction = _call_with_retry(
+            lambda: self._client.interactions.create(
+                model=self._model,
+                input=prompt,
+                response_format={
+                    "type": "text",
+                    "mime_type": "application/json",
+                    "schema": CONTENT_BRIEF_SCHEMA,
+                },
+            )
+        )
+        text = getattr(interaction, "output_text", None)
+        if not text:
+            raise ScriptGenerationError(_describe_incomplete_interaction(interaction))
+        return text
+
     def evaluate_visual_candidate(self, image_bytes: bytes, mime_type: str, prompt: str) -> str:
         """One multimodal (text + image) Interactions call -- confirmed
         against the real, installed google-genai SDK's own request model
@@ -491,6 +515,7 @@ def build_script_prompt(
     game_title: str | None,
     scoring_reasoning: list[str],
     evidence: list[dict[str, Any]],
+    content_brief: ContentBrief | None = None,
 ) -> str:
     """Build the full prompt text for GeminiProvider.generate_script().
 
@@ -511,6 +536,16 @@ def build_script_prompt(
         f"Content pillar: {content_pillar}",
         f"Content role: {content_role}",
     ]
+    if content_brief is not None:
+        context_lines.extend([
+            "Content brief (design to it):",
+            f"- Target audience: {content_brief.target_audience}",
+            f"- Viewer pain/problem: {content_brief.viewer_pain}",
+            f"- Topic angle: {content_brief.topic_angle}",
+            f"- Hook candidates: {content_brief.hook_candidates}",
+            f"- Selected opening hook (YOU MUST use this verbatim as your ``hook`` field): {content_brief.selected_hook}",
+            f"- Why this hook: {content_brief.hook_rationale}",
+        ])
     if monetization_path:
         context_lines.append(f"Monetization angle: {monetization_path}")
     if summary:
@@ -530,6 +565,13 @@ def build_script_prompt(
         + evidence_block
         + "\n\n"
         + _SCRIPT_JSON_INSTRUCTIONS.format()
+        + (
+            "\nYour `hook` field MUST be the selected opening hook from the content brief, verbatim. "
+            "If the selected hook is not already honest to the evidence, use it anyway as the "
+            "opening line (it is an attention device; the fabrication guard separately checks "
+            "the narration for invented numbers)."
+            if content_brief is not None else ""
+        )
     )
 
 
@@ -597,3 +639,88 @@ def to_video_script(
         candidate_id=candidate_id,
         overall_score=overall_score,
     )
+
+
+CONTENT_BRIEF_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "target_audience": {"type": "string"},
+        "viewer_pain": {"type": "string"},
+        "topic_angle": {"type": "string"},
+        "hook_candidates": {
+            "type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 3,
+        },
+        "selected_hook": {"type": "string"},
+        "hook_rationale": {"type": "string"},
+    },
+    "required": ["target_audience", "viewer_pain", "topic_angle", "hook_candidates",
+                 "selected_hook", "hook_rationale"],
+}
+
+
+def build_content_brief_prompt(
+    *, title: str, content_pillar: str, content_role: str,
+    monetization_path: str | None, summary: str | None, hardware_tier: str | None,
+    game_title: str | None, scoring_reasoning: list[str], evidence: list[dict[str, Any]],
+) -> str:
+    """Build an evidence-grounded brief prompt without making provider calls."""
+    context = {
+        "Topic": title, "Content pillar": content_pillar, "Content role": content_role,
+        "Monetization angle": monetization_path, "Research summary": summary,
+        "Hardware tier": hardware_tier, "Game mentioned": game_title,
+        "Scoring reasoning": scoring_reasoning, "Evidence": evidence,
+    }
+    return (
+        "Return a concise YouTube-Shorts content brief for this exact topic in the "
+        "PC-gaming/hardware niche. Define the target audience, the viewer pain/problem "
+        "this video solves, and a fresh, non-generic topic angle. Return 2-3 hook candidates, "
+        "each a single short opening sentence that earns attention in the first 2 seconds. "
+        "selected_hook must be one of hook_candidates. Explain why that hook should retain "
+        "attention in hook_rationale. Hooks may be punchy but must NEVER fabricate a "
+        "number/price/spec not present in the evidence. Return only JSON matching this schema:\n"
+        + json.dumps(CONTENT_BRIEF_SCHEMA, ensure_ascii=False)
+        + "\n\n" + json.dumps(context, ensure_ascii=False)
+    )
+
+
+def parse_content_brief_response(raw_text: str, *, retry_note: str = "") -> dict[str, Any]:
+    """Decode the brief JSON, accepting an optional markdown fence."""
+    text = raw_text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ScriptGenerationError(f"Gemini did not return valid brief JSON{retry_note}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ScriptGenerationError(f"Gemini brief must be an object{retry_note}")
+    missing = [field for field in CONTENT_BRIEF_SCHEMA["required"] if field not in data]
+    if missing:
+        raise ScriptGenerationError(f"Gemini brief is missing required field(s){retry_note}: {missing}")
+    return data
+
+
+def to_content_brief(data: dict[str, Any], *, title: str) -> ContentBrief:
+    """Validate and normalize a decoded brief; reject malformed hook selections."""
+    from scripts.production.content_brief import ContentBrief
+
+    if not isinstance(data, dict):
+        raise ScriptGenerationError(f"Invalid content brief for {title!r}: expected object")
+    values = {}
+    for field in CONTENT_BRIEF_SCHEMA["required"]:
+        value = data.get(field)
+        if field == "hook_candidates":
+            if not isinstance(value, list) or any(not isinstance(h, str) or not h.strip() for h in value):
+                raise ScriptGenerationError(f"Invalid hook_candidates for {title!r}")
+            value = [hook.strip() for hook in value[:3]]
+            if len(value) < 2:
+                raise ScriptGenerationError(f"Content brief for {title!r} needs at least 2 hooks")
+        else:
+            if not isinstance(value, str) or not value.strip():
+                raise ScriptGenerationError(f"Invalid brief field {field!r} for {title!r}")
+            value = str(value).strip()
+        values[field] = value
+    if values["selected_hook"].casefold() not in {hook.casefold() for hook in values["hook_candidates"]}:
+        raise ScriptGenerationError(f"selected_hook is not among hook_candidates for {title!r}")
+    return ContentBrief(**values)

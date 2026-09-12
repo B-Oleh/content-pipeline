@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from scripts.production.content_brief import ContentBrief
 from scripts.production.models import VideoScript
 from scripts.production.providers.telegram_client import TelegramClient
 from scripts.production.telegram_approval import build_approval_keyboard
@@ -44,7 +45,7 @@ def build_caption(script: VideoScript, scored_candidate: ScoredCandidate) -> str
     return "\n".join(lines)
 
 
-def deliver_video(video_path: Path, script: VideoScript, scored_candidate: ScoredCandidate, client: TelegramClient) -> dict:
+def deliver_video(video_path: Path, script: VideoScript, scored_candidate: ScoredCandidate, client: TelegramClient, caption: str | None = None) -> dict:
     """Sends the video with its caption and Approve/Regenerate/Reject
     buttons. The buttons' callback_data carries `script.candidate_id` as
     the stable content ID (see models.py: populated from
@@ -55,9 +56,28 @@ def deliver_video(video_path: Path, script: VideoScript, scored_candidate: Score
     if not script.candidate_id:
         raise ValueError("VideoScript.candidate_id must be set before Telegram delivery (needed for approval callback_data)")
 
-    caption = build_caption(script, scored_candidate)
+    if caption is None:
+        caption = build_caption(script, scored_candidate)
     keyboard = build_approval_keyboard(script.candidate_id)
     logger.info("Sending %s to Telegram (content_id=%s)", video_path, script.candidate_id)
     result = client.send_video(video_path, caption, reply_markup=keyboard)
     logger.info("Telegram delivery succeeded (message_id=%s)", result.get("message_id"))
     return result
+
+
+def build_batch_caption(
+    script: VideoScript, scored_candidate: ScoredCandidate, *, candidate_number: int,
+    batch_size: int, content_brief: ContentBrief, duration_seconds: float,
+    real_media_coverage: float, qa_passed: bool,
+) -> str:
+    """Prepend the morning-review summary to the existing research caption."""
+    lines = [
+        f"🎬 Candidate {candidate_number}/{batch_size}",
+        f"🎮 Topic: {script.topic}",
+        f"👥 Target audience: {content_brief.target_audience}",
+        f"🪝 Hook: {content_brief.selected_hook}",
+        f"⏱ Duration: {duration_seconds:.1f}s",
+        f"🎞 Real-media coverage: {real_media_coverage:.0%}",
+        "✅ QA: passed" if qa_passed else "❌ QA: failed",
+    ]
+    return "\n".join(lines) + "\n\n" + build_caption(script, scored_candidate)

@@ -98,12 +98,15 @@ not-yet-done compliance audit). The analytics provider concern is not implemente
 
 The single place for cloud/CI rules — do not restate these elsewhere.
 
-- GitHub Actions is the cloud execution environment for running the pipeline. Two manually
+- GitHub Actions is the cloud execution environment for running the pipeline. Three manually
   triggered (`workflow_dispatch` only) workflows exist:
   `.github/workflows/research_agent.yml` (see docs/RESEARCH_AGENT.md "GitHub Actions workflow"),
-  which proves Research Agent runs end-to-end and persistent state survives across runs; and
+  which proves Research Agent runs end-to-end and persistent state survives across runs;
   `.github/workflows/produce_video.yml` (see docs/PRODUCTION_PIPELINE.md "GitHub Actions
-  workflow"), which proves one real video reaches Telegram. Neither has a schedule.
+  workflow"), which proves one real video reaches Telegram; and
+  `.github/workflows/produce_batch.yml` (see docs/BATCH_MODE.md), which delivers up to three
+  candidates for morning review and commits JSON metadata under `state/production_batch/`.
+  None has a schedule.
 - The system must run within a strict $0 operating budget while in Stage 1 of the business
   strategy (see [`docs/BUSINESS_STRATEGY.md`](docs/BUSINESS_STRATEGY.md)). Gemini, Pexels,
   Pixabay, edge-tts, and the YouTube Data API v3 (free quota) are all used on their free
@@ -178,6 +181,11 @@ failing the gate are retried with the next eligible research candidate before re
 this check before Telegram. Attempts and their populated scripts are recorded under the production
 work directory; see docs/PRODUCTION_PIPELINE.md "Duration-based visual gate".
 
+
+Overnight batch mode (`production/batch.py`, CLI `scripts.produce_batch`) reuses these
+stages after generating a per-topic content brief. It delivers distinct candidates with
+summaries, persists attempts under `state/production_batch/`, and sends a recap without
+approval polling, winner selection, or publishing. See docs/BATCH_MODE.md.
 
 ### Research and opportunity scoring rules
 

@@ -11,6 +11,7 @@ publishing a guess").
 
 from __future__ import annotations
 
+from scripts.production.content_brief import ContentBrief
 from scripts.production.models import VideoScript
 from scripts.production.providers.llm import (
     LlmProvider,
@@ -35,7 +36,9 @@ def _fabrication_violations(script: VideoScript) -> list[str]:
     return violations
 
 
-def generate_script(provider: LlmProvider, scored_candidate: ScoredCandidate) -> VideoScript:
+def generate_script(
+    provider: LlmProvider, scored_candidate: ScoredCandidate, content_brief: ContentBrief | None = None,
+) -> VideoScript:
     """Generate and validate a VideoScript for one ranked candidate.
 
     Raises ScriptGenerationError if the provider is unusable, the response
@@ -55,6 +58,7 @@ def generate_script(provider: LlmProvider, scored_candidate: ScoredCandidate) ->
         game_title=candidate.game_title,
         scoring_reasoning=scored_candidate.reasoning,
         evidence=evidence,
+        content_brief=content_brief,
     )
 
     raw_text = provider.generate_script(prompt)
