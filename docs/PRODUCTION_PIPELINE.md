@@ -46,14 +46,13 @@ scripts/production/
                                         generic query expansion, on top of Script Agent's own queries
   asset_acquisition.py                 Per-scene multi-candidate Pexels/Pixabay search, metadata
                                         shortlist, Gemini Vision validation, production-mode
-                                        selection (real_visual/hybrid_visual/info_card), density rule
+                                        selection (real_visual/hybrid_visual/info_card)
                                         (see "Visuals" below)
   visual_relevance.py                  Deterministic metadata-only relevance PRE-FILTER + shot-type
                                         classification -- builds the shortlist, does not decide
   vision_validation.py                 Gemini Vision: the actual accept/reject relevance decision
                                         over each scene's metadata shortlist, plus cached-evaluation
-                                        lookup and near-miss "rescue" for the density rule (see
-                                        "Visuals" below)
+                                        lookup (see "Visuals" below)
   info_card.py                         Renders a designed, motion-enhanced "information card" clip
                                         (no real footage) or a "hybrid scene" (real footage + a small
                                         honest overlay card)
@@ -139,9 +138,11 @@ real run:
 | hardware_comparison | Low -- often names exact products stock libraries won't have |
 | game_recommendations, monthly_games | Lowest -- need a *specific* game's footage |
 
-If no candidate falls in a reliable pillar, the single best-ranked candidate is used anyway (with a
-logged warning) rather than failing the run -- CLAUDE.md priorities (see "Priorities") were not
-asked to be relaxed, but a hard stop here would defeat the milestone's purpose of proving delivery.
+Before selection, candidates must contain explicit PC/gaming subject matter in their title or
+summary. A pillar label alone is insufficient; this conservative English vocabulary gate also
+applies to a Telegram regeneration override. Ambiguous topics without explicit niche vocabulary
+are rejected. A low-reliability pillar may still be tried, but every topic must pass the measured
+visual gate below before rendering or delivery.
 
 **Visual producibility (secondary tie-breaker).** `estimate_visual_producibility()` scores a
 candidate 0.0-0.5 by how much concrete, easily-stock-photographed PC/gaming vocabulary
@@ -378,15 +379,15 @@ removed earlier, for free, by `_dedupe_candidates()` above.
 | Mode | When | What is shown |
 |---|---|---|
 | `real_visual` | An approved candidate's Vision `scene_relevance_score >= EXACT_MATCH_SCORE` (85) -- a strong, near-exact match | The real photo/video, full-screen, as-is |
-| `hybrid_visual` | An approved candidate scored between `VISION_RELEVANCE_THRESHOLD` (70) and `EXACT_MATCH_SCORE` (85) -- honest and on-topic but not exact; or a "rescued" near-miss (see density rule below) | The real photo/video as a background, dimmed only lightly, with a small top-anchored overlay card (`info_card.py::render_hybrid_scene()`) |
-| `info_card` | No candidate passed Vision at all, and no rescue applied | A fully designed text card (`info_card.py::render_info_card()`) -- no real footage |
+| `hybrid_visual` | An approved candidate scored between `VISION_RELEVANCE_THRESHOLD` (70) and `EXACT_MATCH_SCORE` (85) -- honest and on-topic but not exact | The real photo/video as a background, dimmed only lightly, with a small top-anchored overlay card (`info_card.py::render_hybrid_scene()`) |
+| `info_card` | No candidate passed Vision at all | A fully designed text card (`info_card.py::render_info_card()`) -- no real footage |
 
 `vision_validation.py::get_cached_evaluation()` reads the *exact* score behind an already-approved
 candidate straight out of the same `vision_cache` used above -- at zero extra Vision cost -- so
 `asset_acquisition.py` can pick `real_visual` vs. `hybrid_visual` for a candidate
 `select_vision_validated_candidate()` already approved.
 
-**Fallback: information card, with NO rejected asset in it.** If nothing is approved (or rescued),
+**Fallback: information card, with NO rejected asset in it.** If nothing is approved,
 `asset_acquisition.py` renders a designed **information card**
 (`info_card.py::render_info_card()`) with a designed gradient/glow background -- instead of using
 misleading generic footage -- honoring the task's explicit "never imply generic stock footage is
@@ -425,16 +426,19 @@ range than the full card's centered `FULL_CARD_PROFILE`) -- e.g. real gaming-des
 a small "MYTH 2" / "You need a flagship GPU" overlay, instead of a full-screen text block. Used
 whenever the best available visual is honest and on-topic but not a strong/exact match on its own.
 
-**Visual-density rule (breaking up runs of info cards).** `asset_acquisition.py` tracks a
-`consecutive_info_cards` counter across the scene loop. Once it reaches
-`MAX_CONSECUTIVE_INFO_CARDS` (2), the next otherwise-info_card scene instead checks
-`vision_validation.find_rescue_candidate()` -- which scans the SAME already-cached Vision
-evaluations (no extra Vision calls) for the best "near miss": genuinely in-domain, not misleading,
-but scored below `VISION_RELEVANCE_THRESHOLD` yet at or above `RESCUE_MIN_SCORE` (55). If one
-exists, it is rendered as a `hybrid_visual` scene instead of another text card, and the counter
-resets; a misleading or out-of-domain candidate is never eligible for rescue at any score. This
-keeps a produced video from ever becoming an unbroken run of text-only cards, per the task's "you
-need watchable and intentional, not perfect cinematic quality" framing.
+**Duration-based visual gate.** `visual_quality.py` requires at least 80% of narration
+runtime to use successfully acquired, Vision-approved Pexels/Pixabay media. Approved photos
+and hybrid scenes count; generated cards, rejected candidates, missing files, and production-mode
+labels alone do not. At most one pure info-card scene may occur consecutively. Rejected near
+misses are never downloaded to break up a card streak. If videos fail Vision, acquisition tries
+photos before falling back to a card.
+
+After voice generation supplies actual scene durations, `pipeline.py` checks this gate before
+rendering. Failed topics are recorded in `visual_attempts.json` and the next eligible topic is
+tried once; exhausting candidates stops production without Telegram delivery. Each attempt's
+assets, audio and populated `script.json` live in `attempts/<number>/`; the selected script is also
+saved at the work directory root. QA repeats the gate and checks that the rendered duration
+matches the scene timeline. Photo output is explicitly trimmed to narration duration.
 
 A still photo (a genuinely Vision-approved one) gets a mild continuous zoom (`zoompan` in
 `video_assembly.py` / `info_card.py`) so no scene sits completely static.

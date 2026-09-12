@@ -178,6 +178,11 @@ This runs preflight first (fails fast and clearly if any of the 5 secrets is mis
 is unreachable — never prints secret values), then the full pipeline, writing intermediate files to
 `data/production/` (transient) and the final video to `output/final_video.mp4` (also transient,
 **never committed to Git**). If Automated QA fails, the video is **not** sent to Telegram.
+Topics outside explicit PC/gaming subject matter are rejected. Before rendering, at least 80% of
+the scene timeline must use accepted Pexels/Pixabay media, with no consecutive pure info cards.
+If a topic fails, production tries the next eligible candidate; if none passes, it stops.
+`data/production/visual_attempts.json` records results and `attempts/` holds per-topic artifacts.
+
 
 ## Running the video production pipeline on GitHub Actions
 

@@ -28,7 +28,7 @@ def _score_kwargs():
 def _scored(candidate_id, pillar, overall_score, rank, title=None, summary=None):
     candidate = ResearchCandidate(
         candidate_id=candidate_id,
-        title=title or f"Topic {candidate_id}",
+        title=title or f"PC gaming topic {candidate_id}",
         content_pillar=pillar,
         content_role=ContentRole.GROWTH,
         source_name="fixture_test",
@@ -80,7 +80,7 @@ def test_preferred_title_is_selected_when_present():
     low_ranked = _scored("a", ContentPillar.OPTIMIZATION, overall_score=3.0, rank=2)
     preferred = _scored("b", ContentPillar.GAME_RECOMMENDATIONS, overall_score=2.0, rank=3)
 
-    chosen = select_topic_candidate(_result([low_ranked, preferred]), preferred_title="Topic b")
+    chosen = select_topic_candidate(_result([low_ranked, preferred]), preferred_title="PC gaming topic b")
 
     assert chosen.candidate.candidate_id == "b"
 
@@ -122,7 +122,7 @@ def test_producibility_never_overrides_pillar_reliability_tier():
         "a", ContentPillar.MONTHLY_GAMES, overall_score=9.0, rank=1,
         title="GPU CPU RAM SSD motherboard hardware build",
     )
-    plain_high_tier = _scored("b", ContentPillar.OPTIMIZATION, overall_score=1.0, rank=2, title="Plain topic")
+    plain_high_tier = _scored("b", ContentPillar.OPTIMIZATION, overall_score=1.0, rank=2, title="PC gaming topic")
 
     chosen = select_topic_candidate(_result([hardware_heavy_low_tier, plain_high_tier]))
 
@@ -146,3 +146,28 @@ def test_deprioritizes_visually_weak_topic_within_the_same_reliability_tier():
     chosen = select_topic_candidate(_result([concrete, abstract]))
 
     assert chosen.candidate.candidate_id == "a"
+
+
+@pytest.mark.parametrize("title", [
+    "Best grocery discounts this month", "Movie reviews and celebrity news",
+    "Football championship results", "A greeting card for your birthday",
+    "A new business case for memory training",
+    "Steam cleaning tips for your kitchen",
+    "A ram joins the sheep flock",
+    "Ram truck buying advice",
+])
+def test_off_topic_is_rejected_even_with_valid_pillar_or_override(title):
+    bad = _scored("bad", ContentPillar.OPTIMIZATION, 10, 1, title=title)
+    with pytest.raises(NoSuitableCandidateError):
+        select_topic_candidate(_result([bad]), preferred_title=title)
+    good = _scored("good", ContentPillar.OPTIMIZATION, 1, 2, title="PC cooling mistakes")
+    assert select_topic_candidate(_result([bad, good]), preferred_title=title) == good
+
+
+@pytest.mark.parametrize("title", [
+    "Steam Deck cooling tips", "Best games on Steam", "Steam library tips",
+    "Is 16 GB of RAM enough?", "RAM timings explained", "DDR5 buying advice",
+])
+def test_ambiguous_terms_with_computing_context_are_accepted(title):
+    good = _scored("good", ContentPillar.OPTIMIZATION, 5, 1, title=title)
+    assert select_topic_candidate(_result([good])) == good

@@ -171,6 +171,14 @@ uploads the approved MP4 to YouTube via `providers/youtube.py` + `youtube_publis
 visibility. Public publishing is a separate, not-yet-done milestone (needs that compliance audit).
 Stages 12-13 are not implemented.
 
+Production enforces a duration-based visual gate (`production/visual_quality.py`): at least 80%
+accepted Pexels/Pixabay media and at most one consecutive pure info card. Topic selection first
+requires explicit PC/gaming vocabulary in title/summary. After acquisition and narration, topics
+failing the gate are retried with the next eligible research candidate before rendering. QA repeats
+this check before Telegram. Attempts and their populated scripts are recorded under the production
+work directory; see docs/PRODUCTION_PIPELINE.md "Duration-based visual gate".
+
+
 ### Research and opportunity scoring rules
 
 Do not blindly generate topics. Score candidate topics using factors such as:

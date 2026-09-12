@@ -592,7 +592,7 @@ def render_hybrid_scene(
     "You need a flagship GPU" over gaming-PC-setup footage, instead of a
     full-screen text block. Used when the best available visual is
     genuinely relevant/honest but not a strong or exact match on its own
-    (see vision_validation.py's EXACT_MATCH_SCORE/RESCUE_MIN_SCORE).
+    (see vision_validation.py's VISION_RELEVANCE_THRESHOLD/EXACT_MATCH_SCORE).
 
     Unlike render_info_card(), `background_path` is REQUIRED -- there is
     no flat/gradient fallback here; a hybrid scene with no real background

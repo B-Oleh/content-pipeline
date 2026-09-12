@@ -50,10 +50,11 @@ def _make_synthetic_audio(path, duration: float, frequency: int) -> None:
 def test_render_and_qa_a_real_synthetic_video(tmp_path):
     scenes = []
     colors = ["red", "green", "blue"]
+    durations = [6.137, 6.612, 7.081]
     for i, color in enumerate(colors):
         video_path = tmp_path / f"asset_{i}.mp4"
         audio_path = tmp_path / f"audio_{i}.mp3"
-        duration = 6.0 + i * 0.5
+        duration = durations[i]
         _make_synthetic_video(video_path, duration, color)
         _make_synthetic_audio(audio_path, duration, frequency=440 + i * 110)
 
@@ -63,6 +64,10 @@ def test_render_and_qa_a_real_synthetic_video(tmp_path):
                 narration_line=f"Scene {i} narration.",
                 asset_path=video_path,
                 asset_is_video=True,
+                # Synthetic fixtures stand in for accepted provider downloads.
+                asset_source="pexels",
+                media_accepted=True,
+                production_mode="real_visual",
                 audio_path=audio_path,
                 duration_seconds=duration,
             )
@@ -89,6 +94,7 @@ def test_render_and_qa_a_real_synthetic_video(tmp_path):
         rendered_scene_count=len(scenes),
         narration_generated=True,
         subtitles_generated=True,
+        scenes=scenes,
     )
 
     assert qa_result.passed, qa_result.summary_lines()
@@ -96,6 +102,9 @@ def test_render_and_qa_a_real_synthetic_video(tmp_path):
     assert qa_result.checks["has_video_stream"]
     assert qa_result.checks["has_audio_stream"]
     assert qa_result.checks["duration_in_range"]
+    assert qa_result.checks["scene_timeline_matches_render"]
+    assert qa_result.checks["real_media_coverage"]
+    assert qa_result.checks["info_card_streak"]
 
 
 def _make_synthetic_photo(path, color: str = "blue") -> None:
@@ -133,3 +142,6 @@ def test_render_with_a_static_image_scene(tmp_path):
     assert qa_result.checks["has_video_stream"]
     assert qa_result.checks["has_audio_stream"]
     assert qa_result.checks["resolution_1080x1920"]
+
+    from scripts.production.ffmpeg_utils import probe_duration_seconds
+    assert abs(probe_duration_seconds(output_path) - 2.0) < 0.1

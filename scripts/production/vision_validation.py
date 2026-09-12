@@ -56,15 +56,6 @@ VISION_RELEVANCE_THRESHOLD = 70
 # exact match.
 EXACT_MATCH_SCORE = 85
 
-# A candidate scoring in [RESCUE_MIN_SCORE, VISION_RELEVANCE_THRESHOLD) that
-# is still genuinely in-domain and not misleading is a "near miss" -- too
-# weak to use on its own, but honest enough to rescue as a hybrid_visual
-# background (with an overlay card) specifically to break up a long run of
-# consecutive info_card scenes (see asset_acquisition.py's density rule,
-# and find_rescue_candidate() below). A misleading or out-of-domain
-# candidate is NEVER eligible for rescue at any score.
-RESCUE_MIN_SCORE = 55
-
 # Only the final 2-3 metadata-scored candidates are ever sent to Vision, to
 # keep the number of Gemini calls per scene small (see task's "avoid using
 # Gemini Vision on excessive candidates" requirement, and the follow-up
@@ -132,7 +123,7 @@ def build_vision_prompt(scene: Scene, query: str) -> str:
         "match: gaming PC internals or components, close-up computer hardware, a desktop/gaming-desk "
         "setup, a person using, comparing, or unboxing PC hardware, someone shopping for or comparing "
         "computer parts, or a gaming monitor/desk environment. A weaker but still honest contextual "
-        "match should score in the 55-84 range, not near zero, so it can still be used (paired with a "
+        "match should score in the 70-84 range, not near zero, so it can still be used (paired with a "
         "short on-screen caption) rather than discarded outright.\n\n"
         "Reject (computer_domain=false and/or misleading=true) if the image shows: a paper "
         "greeting, business, ID, or bank/credit card; a grocery store shelf or food/groceries; "
@@ -278,39 +269,3 @@ def get_cached_evaluation(candidate: ScoredCandidate, scene: Scene, cache: dict)
     thumbnail+context was never evaluated.
     """
     return cache.get(_vision_cache_key(candidate, scene))
-
-
-def find_rescue_candidate(
-    shortlisted: list[ScoredCandidate], scene: Scene, cache: dict
-) -> Optional[tuple[ScoredCandidate, VisionEvaluation]]:
-    """Scans ALREADY-COMPUTED Vision evaluations (from `cache`, populated by
-    a preceding select_vision_validated_candidate() call over this exact
-    `shortlisted` + `scene` + `cache`) for the best "near miss": a
-    candidate that is genuinely in-domain and not misleading, but scored
-    below VISION_RELEVANCE_THRESHOLD (so select_vision_validated_candidate
-    correctly did not approve it) -- yet still scored at or above
-    RESCUE_MIN_SCORE, meaning Vision itself judged it honestly relevant,
-    just not a strong/exact match.
-
-    This NEVER calls Vision again, and NEVER considers a misleading or
-    out-of-domain candidate at any score -- only used by
-    asset_acquisition.py's density rule to break up a long run of
-    consecutive info_card scenes with an honest hybrid_visual instead (see
-    its module docstring), not as a general relevance relaxation. Returns
-    the highest-scoring eligible near-miss, or None if there isn't one.
-    """
-    near_misses: list[tuple[ScoredCandidate, VisionEvaluation]] = []
-    for candidate in shortlisted:
-        evaluation = cache.get(_vision_cache_key(candidate, scene))
-        if evaluation is None:
-            continue
-        if (
-            evaluation.computer_domain
-            and not evaluation.misleading
-            and RESCUE_MIN_SCORE <= evaluation.scene_relevance_score < VISION_RELEVANCE_THRESHOLD
-        ):
-            near_misses.append((candidate, evaluation))
-
-    if not near_misses:
-        return None
-    return max(near_misses, key=lambda pair: pair[1].scene_relevance_score)

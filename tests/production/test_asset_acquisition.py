@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.production.asset_acquisition import MAX_CONSECUTIVE_INFO_CARDS, _dedupe_candidates, acquire_assets
+from scripts.production.asset_acquisition import _dedupe_candidates, acquire_assets
 from scripts.production.visual_relevance import ScoredCandidate
 from scripts.production.models import (
     PRODUCTION_MODE_HYBRID_VISUAL,
@@ -33,7 +33,7 @@ from scripts.production.models import (
 )
 from scripts.production.providers.llm import LlmProvider, VisionEvaluationError
 from scripts.production.providers.visual import AssetResult, VisualAssetProvider
-from scripts.production.vision_validation import EXACT_MATCH_SCORE, RESCUE_MIN_SCORE, SHORTLIST_SIZE, VISION_RELEVANCE_THRESHOLD
+from scripts.production.vision_validation import EXACT_MATCH_SCORE, SHORTLIST_SIZE, VISION_RELEVANCE_THRESHOLD
 
 pytestmark = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
@@ -517,13 +517,10 @@ def test_info_card_is_not_selected_when_an_honest_hybrid_candidate_exists(tmp_pa
     assert scene.asset_source != "info_card"
 
 
-def test_density_rule_rescues_a_near_miss_after_max_consecutive_info_cards(tmp_path, monkeypatch):
-    """Part 5's density rule: once MAX_CONSECUTIVE_INFO_CARDS scenes in a
-    row have fallen back to a text card, the next scene prefers an honest
-    "near miss" (in-domain, not misleading, but below the approval
-    threshold) as a hybrid_visual scene over yet another info card."""
+def test_rejected_near_miss_is_never_used_even_after_consecutive_cards(tmp_path, monkeypatch):
+    """The pipeline retries topics instead of using rejected media to break a streak."""
     _patch_thumbnail_fetch(monkeypatch)
-    assert RESCUE_MIN_SCORE <= 60 < VISION_RELEVANCE_THRESHOLD
+    assert 60 < VISION_RELEVANCE_THRESHOLD
     scene_a = _scene(0, "Some narration with no visual hits at all", ["a query with no hits at all a"])
     scene_b = _scene(1, "Another narration with no visual hits at all", ["a query with no hits at all b"])
     scene_c = _scene(2, "A gaming desk setup nearby", ["gaming desk setup nearby"])
@@ -534,22 +531,9 @@ def test_density_rule_rescues_a_near_miss_after_max_consecutive_info_cards(tmp_p
 
     assert scene_a.production_mode == PRODUCTION_MODE_INFO_CARD
     assert scene_b.production_mode == PRODUCTION_MODE_INFO_CARD
-    assert scene_c.production_mode == PRODUCTION_MODE_HYBRID_VISUAL
-    assert scene_c.asset_source == "pexels"
-
-
-def test_near_miss_is_not_rescued_before_the_consecutive_info_card_limit(tmp_path, monkeypatch):
-    """A near-miss candidate is only spent to break up a run of info cards
-    -- with no prior info_card streak, the same near-miss must still fall
-    back to an info card rather than being used prematurely."""
-    _patch_thumbnail_fetch(monkeypatch)
-    scene = _scene(0, "A gaming desk setup nearby", ["gaming desk setup nearby"])
-    pexels = _FakeProvider("pexels", {"gaming desk setup nearby": [_asset("pexels", "https://pexels.com/video/near-miss-1")]})
-    llm = _FakeLlmProvider([_reject("in-domain but not a strong match", computer_domain=True, score=60, misleading=False)])
-
-    acquire_assets([scene], [pexels], tmp_path, llm)
-
-    assert scene.production_mode == PRODUCTION_MODE_INFO_CARD
+    assert scene_c.production_mode == PRODUCTION_MODE_INFO_CARD
+    assert not scene_c.media_accepted
+    assert not pexels.downloaded
 
 
 def test_among_multiple_passing_candidates_the_highest_vision_score_is_selected(tmp_path, monkeypatch):
@@ -579,3 +563,18 @@ def test_among_multiple_passing_candidates_the_highest_vision_score_is_selected(
 
     assert scene.asset_source == "pexels"
     assert scene.asset_url == "https://pexels.com/video/candidate-b-94"
+
+
+def test_photo_fallback_after_vision_rejects_video(tmp_path, monkeypatch):
+    _patch_thumbnail_fetch(monkeypatch)
+    query = "gaming desk setup"
+    scene = _scene(0, "A gaming desk setup", [query])
+    video = _asset("pexels", "https://pexels.com/video/gaming-desk-video")
+    photo = _asset("pexels", "https://pexels.com/photo/gaming-desk-photo", is_video=False)
+    provider = _FakeProvider("pexels", {query: [video]}, {query: [photo]})
+    llm = _FakeLlmProvider([_reject("not relevant"), _approve(score=95)])
+    acquire_assets([scene], [provider], tmp_path, llm)
+    assert scene.asset_url == photo.page_url
+    assert not scene.asset_is_video
+    assert scene.media_accepted
+    assert [asset for asset, _ in provider.downloaded] == [photo]

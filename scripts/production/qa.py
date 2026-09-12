@@ -11,7 +11,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from scripts.production.ffmpeg_utils import probe_streams
-from scripts.production.models import QAResult
+from scripts.production.models import QAResult, Scene
+from scripts.production.visual_quality import check_visual_quality
 from scripts.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -29,6 +30,7 @@ def run_qa(
     rendered_scene_count: int,
     narration_generated: bool,
     subtitles_generated: bool,
+    scenes: list[Scene] | None = None,
 ) -> QAResult:
     video_path = Path(video_path)
     checks: dict[str, bool] = {}
@@ -77,6 +79,12 @@ def run_qa(
 
     checks["narration_generated"] = narration_generated
     checks["subtitles_generated"] = subtitles_generated
+
+    if scenes is not None:
+        quality = check_visual_quality(scenes)
+        checks.update(quality.checks)
+        details.update(quality.details)
+        checks["scene_timeline_matches_render"] = abs(sum(s.duration_seconds or 0 for s in scenes) - duration) <= 0.1
 
     passed = all(checks.values())
     result = QAResult(passed=passed, checks=checks, details=details)

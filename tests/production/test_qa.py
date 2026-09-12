@@ -91,3 +91,24 @@ def test_ffprobe_failure_is_reported_not_raised(tmp_path, monkeypatch):
 
     assert result.passed is False
     assert result.checks["ffprobe_readable"] is False
+
+
+def test_qa_rechecks_real_media_and_rendered_timeline(tmp_path, monkeypatch):
+    from scripts.production.models import Scene
+    path = tmp_path / "video.mp4"
+    path.write_bytes(b"representative rendered output")
+    info = {
+        "streams": [{"codec_type": "video", "width": 1080, "height": 1920}, {"codec_type": "audio"}],
+        "format": {"duration": "30.0"},
+    }
+    monkeypatch.setattr("scripts.production.qa.probe_streams", lambda _: info)
+    scenes = [Scene(i, "PC hardware", asset_path=path, asset_source="pexels",
+                    media_accepted=True, production_mode="real_visual", duration_seconds=10)
+              for i in range(3)]
+    kwargs = dict(rendered_scene_count=3, narration_generated=True, subtitles_generated=True, scenes=scenes)
+    assert run_qa(path, **kwargs).passed
+    scenes[1].media_accepted = False
+    assert not run_qa(path, **kwargs).checks["real_media_coverage"]
+    scenes[1].media_accepted = True
+    info["format"]["duration"] = "35.0"
+    assert not run_qa(path, **kwargs).checks["scene_timeline_matches_render"]

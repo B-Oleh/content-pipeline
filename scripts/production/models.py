@@ -35,6 +35,7 @@ class Scene:
     asset_path: Optional[Path] = None
     asset_is_video: bool = True
     asset_source: Optional[str] = None  # "pexels" | "pixabay" | "info_card"
+    media_accepted: bool = False  # Vision-approved media successfully acquired for rendering
     asset_url: Optional[str] = None
     asset_attribution: Optional[str] = None
     # One of PRODUCTION_MODE_REAL_VISUAL / _HYBRID_VISUAL / _INFO_CARD (see
@@ -57,6 +58,7 @@ class Scene:
             "asset_is_video": self.asset_is_video,
             "asset_source": self.asset_source,
             "asset_url": self.asset_url,
+            "media_accepted": self.media_accepted,
             "asset_attribution": self.asset_attribution,
             "production_mode": self.production_mode,
             "audio_path": str(self.audio_path) if self.audio_path else None,

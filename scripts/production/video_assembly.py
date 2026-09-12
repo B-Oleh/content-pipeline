@@ -101,10 +101,10 @@ def render_video(scenes: list[Scene], output_path: Path, subtitle_path: Optional
             # whole scene -- a mild continuous zoom keeps it visually alive.
             frames = max(int(scene.duration_seconds * TARGET_FPS), 1)
             video_filter += f",zoompan=z='min(zoom+0.0006,1.12)':d={frames}:s={TARGET_WIDTH}x{TARGET_HEIGHT}:fps={TARGET_FPS}"
-        video_filter += f"[v{i}]"
+        video_filter += f",trim=duration={duration},setpts=PTS-STARTPTS[v{i}]"
         filter_parts.append(video_filter)
 
-        filter_parts.append(f"[{audio_input_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo[a{i}]")
+        filter_parts.append(f"[{audio_input_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo,atrim=duration={duration},asetpts=PTS-STARTPTS[a{i}]")
 
         concat_refs.append(f"[v{i}][a{i}]")
 

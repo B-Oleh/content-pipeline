@@ -52,7 +52,7 @@ _PRODUCIBILITY_BONUS_PER_HIT = 0.1
 
 
 class NoSuitableCandidateError(RuntimeError):
-    """Raised when a Research Agent run produced no candidates at all."""
+    """Raised when a Research Agent run contains no eligible niche candidates."""
 
 
 def estimate_visual_producibility(candidate: ResearchCandidate) -> float:
@@ -78,6 +78,23 @@ def estimate_visual_producibility(candidate: ResearchCandidate) -> float:
     return min(hits, _MAX_PRODUCIBILITY_KEYWORD_HITS) * _PRODUCIBILITY_BONUS_PER_HIT
 
 
+def is_on_topic(candidate: ResearchCandidate) -> bool:
+    """Require explicit PC/gaming subject matter, never just an RSS pillar label."""
+    text = f"{candidate.title} {candidate.summary or ''}".lower()
+    return bool(re.search(
+        r"\b(pc|gaming|gamer|gamers|gpu|cpu|ssd|motherboard|graphics card|"
+        r"video games?|computer|computers|laptop|laptops|geforce|radeon|ryzen|"
+        r"ddr[345]|random access memory|steam deck)\b", text
+    ) or re.search(
+        # Steam and ram also describe cleaning, animals, and vehicles.
+        # Require an explicit computing context for these ambiguous terms.
+        r"\bsteam\b.*\b(games?|store|library|wishlist)\b|"
+        r"\b(games?|store|library|wishlist)\b.*\bsteam\b|"
+        r"\b\d+\s*gb\s+(?:of\s+)?ram\b|"
+        r"\bram\s+(?:capacity|speed|timings|latency|modules?|upgrade)\b", text
+    ))
+
+
 def select_topic_candidate(result: ResearchResult, preferred_title: Optional[str] = None) -> ScoredCandidate:
     """Pick the candidate to produce a video for.
 
@@ -97,11 +114,15 @@ def select_topic_candidate(result: ResearchResult, preferred_title: Optional[str
     reliably-illustrated pillars are present, rather than failing the run
     outright.
     """
-    if not result.candidates:
-        raise NoSuitableCandidateError("Research Agent produced no candidates to select a topic from")
+    candidates = [s for s in result.candidates if is_on_topic(s.candidate)]
+    for scored in result.candidates:
+        if scored not in candidates:
+            logger.warning("Rejecting off-topic candidate: %r", scored.candidate.title)
+    if not candidates:
+        raise NoSuitableCandidateError("Research Agent produced no on-topic candidates to select a topic from")
 
     if preferred_title:
-        for scored in result.candidates:
+        for scored in candidates:
             if scored.candidate.title == preferred_title:
                 logger.info("Regeneration requested %r -- found and re-selected the same topic", preferred_title)
                 return scored
@@ -116,7 +137,7 @@ def select_topic_candidate(result: ResearchResult, preferred_title: Optional[str
         producibility = estimate_visual_producibility(scored.candidate)
         return (reliability, producibility, scored.overall_score)
 
-    best = max(result.candidates, key=sort_key)
+    best = max(candidates, key=sort_key)
 
     if PILLAR_VISUAL_RELIABILITY.get(best.candidate.content_pillar, 0) == 0:
         logger.warning(

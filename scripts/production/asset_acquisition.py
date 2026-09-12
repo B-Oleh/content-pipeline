@@ -26,8 +26,7 @@ Every scene is given one of three production modes (see models.py's
 PRODUCTION_MODE_* constants and docs/PRODUCTION_PIPELINE.md "Visual
 production modes"):
 - real_visual -- a strong, near-exact Vision-approved match, used as-is.
-- hybrid_visual -- a genuinely honest but not exact/strong match (or a
-  "rescued" near-miss -- see below), used as a real background with a
+- hybrid_visual -- a genuinely honest but not exact/strong match, used as a real background with a
   small honest overlay card instead of shown full-screen as if exact.
 - info_card -- no honest real or contextual visual was found at all; a
   designed, motion-enhanced text card is rendered instead of misleading
@@ -35,12 +34,9 @@ production modes"):
   generic stock footage is footage of a specific named game, GPU, laptop,
   or product" requirement).
 
-A density rule tracks consecutive info_card scenes and, once
-MAX_CONSECUTIVE_INFO_CARDS is reached, spends an otherwise-rejected but
-honest "near miss" candidate (vision_validation.find_rescue_candidate(),
-computed from Vision evaluations already cached this run -- no extra
-Vision calls) as a hybrid_visual scene instead of another info card, so a
-video can never become an unbroken run of text-only cards.
+Rejected candidates are never rescued to fill a scene. The pipeline checks
+actual narration durations after acquisition, and retries another topic if
+accepted media covers less than 80% or more than one info card is consecutive.
 """
 
 from __future__ import annotations
@@ -62,7 +58,6 @@ from scripts.production.vision_validation import (
     EXACT_MATCH_SCORE,
     SHORTLIST_SIZE,
     VisionEvaluation,
-    find_rescue_candidate,
     get_cached_evaluation,
     select_vision_validated_candidate,
 )
@@ -82,12 +77,6 @@ logger = get_logger(__name__)
 # providers.
 MIN_CANDIDATE_POOL_SIZE = 6
 RESULTS_PER_QUERY = 3
-
-# Part 5's visual-density rule: once this many scenes in a row have become
-# info_card, the next scene prefers an honest "rescued" near-miss
-# hybrid_visual over yet another text card -- see find_rescue_candidate()
-# and its own docstring for why this never spends an extra Vision call.
-MAX_CONSECUTIVE_INFO_CARDS = 2
 
 
 class AssetAcquisitionError(RuntimeError):
@@ -183,6 +172,7 @@ def _download_best_candidate(
     scene.asset_source = best.asset.provider
     scene.asset_url = best.asset.page_url
     scene.asset_attribution = f"{best.asset.attribution} (relevance {best.score:.2f}: {best.reason})"
+    scene.media_accepted = True
     scene.production_mode = PRODUCTION_MODE_REAL_VISUAL
 
 
@@ -198,17 +188,8 @@ def _use_hybrid_scene(
     evaluation: VisionEvaluation,
     providers: list[VisualAssetProvider],
     assets_dir: Path,
-    *,
-    rescued: bool,
 ) -> None:
-    """Downloads `candidate`'s real footage as a source backdrop, then
-    renders it through info_card.render_hybrid_scene() with a small honest
-    overlay card, and uses the RESULT (not the raw download) as the
-    scene's visual (scene.production_mode = "hybrid_visual"). Used both
-    for an approved-but-not-exact match and for a "rescued" near-miss (see
-    module docstring) -- the only difference is the logged/attributed
-    reason.
-    """
+    """Render approved contextual media with a small, honest overlay."""
     source_extension = "mp4" if candidate.asset.is_video else "jpg"
     source_path = assets_dir / f"scene_{scene.index:02d}_source.{source_extension}"
     _provider_for(candidate, providers).download(candidate.asset, source_path)
@@ -226,10 +207,11 @@ def _use_hybrid_scene(
     scene.asset_is_video = True
     scene.asset_source = candidate.asset.provider
     scene.asset_url = candidate.asset.page_url
-    reason = "rescued near-miss (breaking up consecutive info cards)" if rescued else "honest but not exact match"
+    reason = "honest but not exact match"
     scene.asset_attribution = (
         f"{candidate.asset.attribution} (relevance {candidate.score:.2f}, vision score={evaluation.scene_relevance_score}: {reason})"
     )
+    scene.media_accepted = True
     scene.production_mode = PRODUCTION_MODE_HYBRID_VISUAL
 
 
@@ -261,6 +243,7 @@ def _use_info_card(scene: Scene, had_candidates: bool, dest_path: Path) -> None:
     scene.asset_url = None
     reason = "no candidate was found at all" if not had_candidates else "no shortlisted candidate passed Gemini Vision's relevance/domain check"
     scene.asset_attribution = f"Generated information card ({reason})"
+    scene.media_accepted = False
     scene.production_mode = PRODUCTION_MODE_INFO_CARD
 
 
@@ -273,12 +256,7 @@ def acquire_assets(
 
     `vision_cache` is created once here and threaded through every scene's
     Vision call so an identical thumbnail+context is never sent to Gemini
-    twice within this run (see vision_validation.py's own cache-key
-    docstring for why it is scoped to exact thumbnail+scene+query matches,
-    not thumbnail alone). It also backs get_cached_evaluation()/
-    find_rescue_candidate() below, which read already-computed evaluations
-    to decide real_visual vs. hybrid_visual and to find a rescue candidate,
-    without ever spending an extra Vision call.
+    twice within this run. Only Vision-approved candidates are downloaded.
     """
     assets_dir = Path(workdir) / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
@@ -289,6 +267,12 @@ def acquire_assets(
     for scene in scenes:
         shortlist = _shortlist_candidates(scene, providers, previous_shot_type)
         approved = select_vision_validated_candidate(llm_provider, shortlist, scene, cache=vision_cache) if shortlist else None
+
+        if approved is None and any(c.asset.is_video for c in shortlist):
+            photos = _score_all(_collect_candidates(scene, providers, "search_photos"), scene, previous_shot_type)
+            photos = sorted(_dedupe_candidates(photos), key=lambda c: c.score, reverse=True)[:SHORTLIST_SIZE]
+            approved = select_vision_validated_candidate(llm_provider, photos, scene, cache=vision_cache) if photos else None
+            shortlist += photos
 
         if approved is not None:
             evaluation = get_cached_evaluation(approved, scene, vision_cache)
@@ -306,7 +290,7 @@ def acquire_assets(
                     score,
                 )
             else:
-                _use_hybrid_scene(scene, approved, evaluation, providers, assets_dir, rescued=False)
+                _use_hybrid_scene(scene, approved, evaluation, providers, assets_dir)
                 logger.info(
                     "Scene %d: acquired honest but not exact match from %s (vision_score=%d) -- hybrid_visual",
                     scene.index,
@@ -317,28 +301,12 @@ def acquire_assets(
             consecutive_info_cards = 0
             continue
 
-        rescue = find_rescue_candidate(shortlist, scene, vision_cache) if shortlist else None
-        if rescue is not None and consecutive_info_cards >= MAX_CONSECUTIVE_INFO_CARDS:
-            rescue_candidate, rescue_evaluation = rescue
-            broken_streak = consecutive_info_cards
-            _use_hybrid_scene(scene, rescue_candidate, rescue_evaluation, providers, assets_dir, rescued=True)
-            previous_shot_type = rescue_candidate.shot_type
-            consecutive_info_cards = 0
-            logger.info(
-                "Scene %d: rescued a near-miss from %s (vision_score=%d) as hybrid_visual to break up %d consecutive info cards",
-                scene.index,
-                rescue_candidate.asset.provider,
-                rescue_evaluation.scene_relevance_score,
-                broken_streak,
-            )
-            continue
-
         dest_path = assets_dir / f"scene_{scene.index:02d}.mp4"
         _use_info_card(scene, had_candidates=bool(shortlist), dest_path=dest_path)
         previous_shot_type = INFO_CARD_SHOT_TYPE
         consecutive_info_cards += 1
         logger.info(
-            "Scene %d: no Vision-approved or rescuable asset found (%d candidate(s) shortlisted) -- used an information card instead (%d consecutive)",
+            "Scene %d: no Vision-approved asset found (%d candidate(s) shortlisted) -- used an information card instead (%d consecutive)",
             scene.index,
             len(shortlist),
             consecutive_info_cards,

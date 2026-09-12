@@ -11,7 +11,7 @@ here).
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional
 
@@ -35,7 +35,8 @@ from scripts.production.telegram_approval import (
     trigger_regeneration_workflow,
 )
 from scripts.production.telegram_delivery import deliver_video
-from scripts.production.topic_selection import select_topic_candidate
+from scripts.production.topic_selection import NoSuitableCandidateError, select_topic_candidate
+from scripts.production.visual_quality import VisualQualityError, check_visual_quality
 from scripts.production.video_assembly import render_video
 from scripts.production.voice_generation import generate_narration
 from scripts.production.youtube_publishing import PublicationRecord, publish_approved_video
@@ -83,20 +84,39 @@ def run_pipeline(
     if research_state_dir is not None:
         research_kwargs["state_dir"] = research_state_dir
     research_result = run_research_agent(**research_kwargs)
-    scored_candidate = select_topic_candidate(research_result, preferred_title=topic_override)
-
-    logger.info("Stage: Script Agent (Gemini)")
     llm_provider = GeminiProvider(gemini_api_key)
-    script = generate_script(llm_provider, scored_candidate)
+    visual_providers = [PexelsProvider(pexels_api_key), PixabayProvider(pixabay_api_key)]
+    voice_provider = EdgeTtsProvider()
+    remaining = list(research_result.candidates)
+    attempts = []
+    while remaining:
+        try:
+            scored_candidate = select_topic_candidate(
+                replace(research_result, candidates=remaining), preferred_title=topic_override
+            )
+        except NoSuitableCandidateError as exc:
+            raise VisualQualityError("No on-topic candidate can meet visual quality requirements") from exc
+        remaining.remove(scored_candidate)
+        attempt_dir = workdir / "attempts" / str(len(attempts) + 1)
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Stage: Script Agent (topic=%r)", scored_candidate.candidate.title)
+        script = generate_script(llm_provider, scored_candidate)
+        logger.info("Stage: Asset Acquisition")
+        acquire_assets(script.scenes, visual_providers, attempt_dir, llm_provider)
+        logger.info("Stage: Voice Generation")
+        subtitle_cues = generate_narration(script.scenes, voice_provider, attempt_dir)
+        quality = check_visual_quality(script.scenes)
+        (attempt_dir / "script.json").write_text(json.dumps(script.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+        attempts.append({"topic": script.topic, **quality.to_dict()})
+        (workdir / "visual_attempts.json").write_text(json.dumps(attempts, indent=2), encoding="utf-8")
+        if quality.passed:
+            break
+        logger.warning("Topic cannot meet visual quality; trying another: %s", quality.summary_lines())
+        topic_override = None
+    else:
+        raise VisualQualityError("All candidate topics failed visual quality; no video produced")
     (workdir / "script.json").write_text(json.dumps(script.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
 
-    logger.info("Stage: Asset Acquisition (Pexels/Pixabay + Gemini Vision)")
-    visual_providers = [PexelsProvider(pexels_api_key), PixabayProvider(pixabay_api_key)]
-    acquire_assets(script.scenes, visual_providers, workdir, llm_provider)
-
-    logger.info("Stage: Voice Generation (edge-tts) + Subtitles")
-    voice_provider = EdgeTtsProvider()
-    subtitle_cues = generate_narration(script.scenes, voice_provider, workdir)
     subtitle_path = workdir / "captions.ass"
     write_ass(subtitle_cues, subtitle_path)
 
@@ -109,6 +129,7 @@ def run_pipeline(
         rendered_scene_count=len(script.scenes),
         narration_generated=all(scene.audio_path is not None for scene in script.scenes),
         subtitles_generated=len(subtitle_cues) > 0,
+        scenes=script.scenes,
     )
     (workdir / "qa_result.json").write_text(json.dumps(qa_result.to_dict(), indent=2), encoding="utf-8")
 
