@@ -1,0 +1,303 @@
+{
+  "batch_id": "2026-09-13T07:29:03.397528Z",
+  "generated_at": "2026-09-13T08:23:08.477730Z",
+  "batch_size": 3,
+  "attempts": [
+    {
+      "attempt_number": 1,
+      "candidate_id": "fixture:gpu-buying-myths",
+      "topic": "3 GPU buying myths that waste your money",
+      "candidate_number": null,
+      "status": "failed_visual",
+      "failure_reason": "[OK] valid_scene_durations; [FAILED] real_media_coverage -- 9.840/42.600s (23.1%); required 80%; [FAILED] info_card_streak -- 2 consecutive; maximum 1",
+      "content_brief": {
+        "target_audience": "PC gamers and budget-conscious builders preparing to buy or upgrade a graphics card.",
+        "viewer_pain": "Wasting money on over-hyped GPU specs or outdated advice that doesn't improve actual gaming performance.",
+        "topic_angle": "Focus on the specific marketing trapdoors and outdated rules of thumb that trick gamers into overpaying for performance they can't use.",
+        "hook_candidates": [
+          "Stop falling for these GPU buying myths before you upgrade your rig.",
+          "You might be wasting cash on your next graphics card without realizing it.",
+          "Before you buy a new GPU, make sure you aren't falling for these traps."
+        ],
+        "selected_hook": "Stop falling for these GPU buying myths before you upgrade your rig.",
+        "hook_rationale": "Directly confronts the viewer with an urgent command that triggers loss aversion, compelling them to stop scrolling so they avoid making a costly mistake on their next PC build."
+      },
+      "script": {
+        "topic": "3 GPU buying myths that waste your money",
+        "content_role": "hybrid",
+        "hook": "Stop falling for these GPU buying myths before you upgrade your rig.",
+        "narration": "Stop falling for these GPU buying myths before you upgrade your rig. Myth one: More VRAM automatically means faster performance. Extra memory only helps if your games actually use it; otherwise, that extra cash is wasted. Myth two: You need the flagship card to play modern games. Mid-range GPUs often deliver incredible performance for half the price. Myth three: Clock speeds on the box tell the whole story. Architecture and real-world benchmarks matter far more than raw megahertz numbers. Always check independent benchmarks for the specific games you play before dropping your hard-earned cash.",
+        "scenes": [
+          {
+            "index": 0,
+            "narration_line": "Stop falling for these GPU buying myths before you upgrade your rig. Myth one: More VRAM automatically means faster performance. Extra memory only helps if your games actually use it; otherwise, that extra cash is wasted.",
+            "on_screen_text": "Myth 1: VRAM = Speed?",
+            "visual_search_queries": [
+              "hand inserting graphics card into motherboard",
+              "pc game graphic settings menu video memory usage",
+              "gamer looking at computer monitor intently",
+              "close up glowing computer graphics card fans"
+            ],
+            "asset_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_1/assets/scene_00.mp4",
+            "asset_is_video": true,
+            "asset_source": "info_card",
+            "asset_url": null,
+            "media_accepted": false,
+            "asset_attribution": "Generated information card (no shortlisted candidate passed Gemini Vision's relevance/domain check)",
+            "production_mode": "info_card",
+            "audio_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_1/audio/scene_00.mp3",
+            "duration_seconds": 16.584
+          },
+          {
+            "index": 1,
+            "narration_line": "Myth two: You need the flagship card to play modern games. Mid-range GPUs often deliver incredible performance for half the price.",
+            "on_screen_text": "Myth 2: Must Buy Top-Tier?",
+            "visual_search_queries": [
+              "expensive computer hardware retail display box",
+              "close up modern pc desktop graphics card glowing",
+              "person playing fast paced video game on ultrawide monitor",
+              "budget desktop pc build on workspace"
+            ],
+            "asset_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_1/assets/scene_01.mp4",
+            "asset_is_video": true,
+            "asset_source": "pexels",
+            "asset_url": "https://www.pexels.com/video/vibrant-gaming-pc-with-rgb-lighting-34280528/",
+            "media_accepted": true,
+            "asset_attribution": "Video by Gladin  Joseph on Pexels (relevance 0.15: no specific keyword overlap for query 'expensive computer hardware retail display box' (metadata-only match); vision approved (score=85): The image clearly shows the illuminated interior of a gaming PC including RGB cooling fans and a Zotac graphics card.)",
+            "production_mode": "real_visual",
+            "audio_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_1/audio/scene_01.mp3",
+            "duration_seconds": 9.84
+          },
+          {
+            "index": 2,
+            "narration_line": "Myth three: Clock speeds on the box tell the whole story. Architecture and real-world benchmarks matter far more than raw megahertz numbers.",
+            "on_screen_text": "Myth 3: Clock Speed Is Everything",
+            "visual_search_queries": [
+              "finger pointing at computer spec sheet on screen",
+              "close up silicon microchip processor macro shot",
+              "gamer analyzing graphs on dual monitor setup",
+              "side view of illuminated custom gaming pc case"
+            ],
+            "asset_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_1/assets/scene_02.mp4",
+            "asset_is_video": true,
+            "asset_source": "info_card",
+            "asset_url": null,
+            "media_accepted": false,
+            "asset_attribution": "Generated information card (no shortlisted candidate passed Gemini Vision's relevance/domain check)",
+            "production_mode": "info_card",
+            "audio_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_1/audio/scene_02.mp3",
+            "duration_seconds": 9.768
+          },
+          {
+            "index": 3,
+            "narration_line": "Always check independent benchmarks for the specific games you play before dropping your hard-earned cash.",
+            "on_screen_text": "Check Benchmarks First!",
+            "visual_search_queries": [
+              "person scrolling computer hardware review website",
+              "hands typing on RGB mechanical keyboard",
+              "close up gamer smiling in front of pc setup",
+              "desktop pc setup with dynamic lighting"
+            ],
+            "asset_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_1/assets/scene_03.mp4",
+            "asset_is_video": true,
+            "asset_source": "info_card",
+            "asset_url": null,
+            "media_accepted": false,
+            "asset_attribution": "Generated information card (no shortlisted candidate passed Gemini Vision's relevance/domain check)",
+            "production_mode": "info_card",
+            "audio_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_1/audio/scene_03.mp3",
+            "duration_seconds": 6.408
+          }
+        ],
+        "title": "3 GPU Buying Myths Wasting Your Money",
+        "description": "Avoid overpaying for your next graphics card upgrade. We debunk three common GPU buying myths that trick PC gamers into wasting cash.",
+        "evidence_references": [
+          "fixture_sample_v1"
+        ],
+        "candidate_id": "fixture:gpu-buying-myths",
+        "overall_score": 5.98
+      },
+      "qa_passed": null,
+      "duration_seconds": 42.6,
+      "real_media_coverage": 0.23098591549295774,
+      "video_path": null
+    },
+    {
+      "attempt_number": 2,
+      "candidate_id": "eurogamer_rss:42c3edf56a",
+      "topic": "Nightdive confirms Thief Remastered's leaked new campaign, The Tarnished Mirror, with a November reveal date",
+      "candidate_number": null,
+      "status": "failed_visual",
+      "failure_reason": "[OK] valid_scene_durations; [FAILED] real_media_coverage -- 0.000/39.504s (0.0%); required 80%; [FAILED] info_card_streak -- 4 consecutive; maximum 1",
+      "content_brief": {
+        "target_audience": "Retro PC gamers, stealth action fans, and immersive sim enthusiasts tracking Nightdive Studios remasters.",
+        "viewer_pain": "Skepticism that classic game remasters are just lazy texture upscales with no new content.",
+        "topic_angle": "Nightdive isn't just polishing graphics—they are officially building a brand-new story campaign for Thief after Steam leaks forced their hand.",
+        "hook_candidates": [
+          "That massive Steam leak was real: Thief Remastered is getting an entirely new story campaign.",
+          "If you thought the Thief remaster was just a graphics patch, think again.",
+          "Nightdive just confirmed a new Thief campaign after Steam leaks spilled the news early."
+        ],
+        "selected_hook": "That massive Steam leak was real: Thief Remastered is getting an entirely new story campaign.",
+        "hook_rationale": "It immediately validates popular leak rumors while subverting expectations that the remaster is just a visual upgrade, driving instant retention for stealth fans."
+      },
+      "script": {
+        "topic": "Nightdive confirms Thief Remastered's leaked new campaign, The Tarnished Mirror, with a November reveal date",
+        "content_role": "growth",
+        "hook": "That massive Steam leak was real: Thief Remastered is getting an entirely new story campaign.",
+        "narration": "That massive Steam leak was real: Thief Remastered is getting an entirely new story campaign. Nightdive Studios officially confirmed 'The Tarnished Mirror' campaign, just days after a massive Steam achievements leak spilled the title. Many retro PC gamers feared Thief: The Dark Project Remastered would be a simple texture polish, but Nightdive is going way beyond upscaled graphics. They're adding brand-new story content to the classic immersive sim, bringing fresh stealth action to long-time fans. We won't have to wait long for the official details—Nightdive confirmed a full reveal is set for November.",
+        "scenes": [
+          {
+            "index": 0,
+            "narration_line": "That massive Steam leak was real: Thief Remastered is getting an entirely new story campaign. Nightdive Studios officially confirmed 'The Tarnished Mirror' campaign, just days after a massive Steam achievements leak spilled the title.",
+            "on_screen_text": "Steam Leak Confirmed",
+            "visual_search_queries": [
+              "person scrolling tech news feed on smartphone",
+              "computer monitor showing digital store page",
+              "hands typing rapidly on mechanical keyboard illuminated",
+              "gamer reading news on dark dual monitor setup"
+            ],
+            "asset_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_2/assets/scene_00.mp4",
+            "asset_is_video": true,
+            "asset_source": "info_card",
+            "asset_url": null,
+            "media_accepted": false,
+            "asset_attribution": "Generated information card (no shortlisted candidate passed Gemini Vision's relevance/domain check)",
+            "production_mode": "info_card",
+            "audio_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_2/audio/scene_00.mp3",
+            "duration_seconds": 14.88
+          },
+          {
+            "index": 1,
+            "narration_line": "Many retro PC gamers feared Thief: The Dark Project Remastered would be a simple texture polish, but Nightdive is going way beyond upscaled graphics.",
+            "on_screen_text": "More Than A Graphics Patch",
+            "visual_search_queries": [
+              "retro CRT monitor showing classic computer game",
+              "glowing computer hardware graphics card inside case",
+              "close up of fingers on WASD keyboard controls",
+              "person adjusting graphics settings on gaming monitor"
+            ],
+            "asset_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_2/assets/scene_01.mp4",
+            "asset_is_video": true,
+            "asset_source": "info_card",
+            "asset_url": null,
+            "media_accepted": false,
+            "asset_attribution": "Generated information card (no shortlisted candidate passed Gemini Vision's relevance/domain check)",
+            "production_mode": "info_card",
+            "audio_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_2/audio/scene_01.mp3",
+            "duration_seconds": 10.224
+          },
+          {
+            "index": 2,
+            "narration_line": "They're adding brand-new story content to the classic immersive sim, bringing fresh stealth action to long-time fans.",
+            "on_screen_text": "New Story Campaign",
+            "visual_search_queries": [
+              "shadowy figure walking down dark urban alleyway cinematic",
+              "gamer wearing headphones focused on screen in dark room",
+              "close up of hand holding gaming mouse moving fast",
+              "desktop PC setup glowing with ambient RGB lights"
+            ],
+            "asset_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_2/assets/scene_02.mp4",
+            "asset_is_video": true,
+            "asset_source": "info_card",
+            "asset_url": null,
+            "media_accepted": false,
+            "asset_attribution": "Generated information card (no shortlisted candidate passed Gemini Vision's relevance/domain check)",
+            "production_mode": "info_card",
+            "audio_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_2/audio/scene_02.mp3",
+            "duration_seconds": 7.512
+          },
+          {
+            "index": 3,
+            "narration_line": "We won't have to wait long for the official details—Nightdive confirmed a full reveal is set for November.",
+            "on_screen_text": "Full Reveal This November",
+            "visual_search_queries": [
+              "calendar schedule app on smartphone screen close up",
+              "excited gamer raising hands in front of PC monitor",
+              "person taking notes at glowing computer desk setup",
+              "computer monitor screen displaying upcoming release date countdown"
+            ],
+            "asset_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_2/assets/scene_03.mp4",
+            "asset_is_video": true,
+            "asset_source": "info_card",
+            "asset_url": null,
+            "media_accepted": false,
+            "asset_attribution": "Generated information card (no shortlisted candidate passed Gemini Vision's relevance/domain check)",
+            "production_mode": "info_card",
+            "audio_path": "/home/runner/work/content-pipeline/content-pipeline/data/production/candidates/candidate_2/audio/scene_03.mp3",
+            "duration_seconds": 6.888
+          }
+        ],
+        "title": "Thief Remastered New Campaign Confirmed!",
+        "description": "Nightdive Studios has officially confirmed The Tarnished Mirror, a brand-new story campaign for Thief Remastered following a Steam leak, set for a November reveal.",
+        "evidence_references": [
+          "Eurogamer report on Nightdive confirming Thief Remastered's The Tarnished Mirror campaign and November reveal date after Steam achievements leak"
+        ],
+        "candidate_id": "eurogamer_rss:42c3edf56a",
+        "overall_score": 4.42
+      },
+      "qa_passed": null,
+      "duration_seconds": 39.504,
+      "real_media_coverage": 0.0,
+      "video_path": null
+    },
+    {
+      "attempt_number": 3,
+      "candidate_id": "eurogamer_rss:b75740d79f",
+      "topic": "More than 40% of people cancelling Xbox Game Pass, PlayStation Plus and Nintendo Switch Online subscriptions blame rising costs",
+      "candidate_number": null,
+      "status": "failed_rate_limit",
+      "failure_reason": "RateLimitError: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.6-flash\\nPlease retry in 43.794467529s.', 'code': 'too_many_requests'}}",
+      "content_brief": null,
+      "script": null,
+      "qa_passed": null,
+      "duration_seconds": null,
+      "real_media_coverage": null,
+      "video_path": null
+    },
+    {
+      "attempt_number": 4,
+      "candidate_id": "fixture:mid-range-budget-build",
+      "topic": "Best mid-range PC build for 1080p gaming this quarter",
+      "candidate_number": null,
+      "status": "failed_rate_limit",
+      "failure_reason": "RateLimitError: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.6-flash\\nPlease retry in 53.941696941s.', 'code': 'too_many_requests'}}",
+      "content_brief": null,
+      "script": null,
+      "qa_passed": null,
+      "duration_seconds": null,
+      "real_media_coverage": null,
+      "video_path": null
+    },
+    {
+      "attempt_number": 5,
+      "candidate_id": "fixture:budget-mouse-2026",
+      "topic": "Best budget gaming mice under $30 in 2026",
+      "candidate_number": null,
+      "status": "failed_rate_limit",
+      "failure_reason": "RateLimitError: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.6-flash\\nPlease retry in 50.37216236s.', 'code': 'too_many_requests'}}",
+      "content_brief": null,
+      "script": null,
+      "qa_passed": null,
+      "duration_seconds": null,
+      "real_media_coverage": null,
+      "video_path": null
+    },
+    {
+      "attempt_number": 6,
+      "candidate_id": "fixture:monthly-high-end-cyberpunk",
+      "topic": "What to play this month on a high-end PC: Cyberpunk 2077",
+      "candidate_number": null,
+      "status": "failed_exception",
+      "failure_reason": "RateLimitError: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.6-flash\\nPlease retry in 51.553665116s.', 'code': 'too_many_requests'}}",
+      "content_brief": null,
+      "script": null,
+      "qa_passed": null,
+      "duration_seconds": null,
+      "real_media_coverage": null,
+      "video_path": null
+    }
+  ],
+  "completed": [],
+  "blocker": "Gemini free-tier rate limit persisted after 3 recovery round(s): RateLimitError: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.6-flash\\nPlease retry in 51.553665116s.', 'code': 'too_many_requests'}}"
+}
