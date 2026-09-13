@@ -12,7 +12,9 @@ import base64
 import json
 import random
 import re
+import threading
 import time
+from collections import deque
 from typing import Any, Callable, Optional, TypeVar, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -37,6 +39,25 @@ GEMINI_MAX_RETRIES = 3
 GEMINI_BASE_RETRY_DELAY_SECONDS = 2.0
 GEMINI_MAX_RETRY_DELAY_SECONDS = 60.0
 GEMINI_RETRY_JITTER_RATIO = 0.25
+
+# Gemini's free tier allows ~20 generate_content requests per MINUTE
+# (verify: HTTP 429 "Quota exceeded for metric
+# generativelanguage.googleapis.com/generate_content_free_tier_requests,
+# limit: 20"). A *per-call* retry window alone is not enough: the overnight
+# batch's real failure was a burst of Script + content-brief + Vision calls
+# saturating the rolling minute before any single call's retry could help.
+# The GeminiRateLimiter below coordinates every Gemini call that flows
+# through one provider instance so bursts are smoothed to a sustainable rate
+# (~MAX/60s) BEFORE they hit the server, and a seen 429's retry window is
+# respected by *all* callers, not just the one that received it.
+GEMINI_RATE_LIMIT_MAX_PER_WINDOW = 20
+GEMINI_RATE_LIMIT_WINDOW_SECONDS = 60.0
+# Slightly under MAX/WINDOW so an exact 20/60s burst never sits right on
+# the limit: 3.2s spacing sustains ~18.75 requests/min, leaving ~1.25
+# requests/min of headroom inside the free-tier cap.
+GEMINI_RATE_LIMIT_MIN_INTERVAL_SECONDS = 3.2
+GEMINI_RATE_LIMIT_SATURATION_MARGIN_SECONDS = 2.0
+GEMINI_RATE_LIMIT_MAX_SINGLE_WAIT_SECONDS = 90.0
 
 _T = TypeVar("_T")
 
@@ -309,17 +330,39 @@ def _extract_retry_after_seconds(exc: Exception) -> Optional[float]:
     return None
 
 
-def _call_with_retry(operation: Callable[[], _T], *, max_retries: int = GEMINI_MAX_RETRIES) -> _T:
+def _call_with_retry(
+    operation: Callable[[], _T],
+    *,
+    max_retries: int = GEMINI_MAX_RETRIES,
+    rate_limiter: "Optional[GeminiRateLimiter]" = None,
+) -> _T:
     """Runs `operation()`, retrying only on HTTP 429 (see _is_rate_limited)
     up to `max_retries` times with exponential backoff + jitter -- or the
     server's own Retry-After/RetryInfo delay when it provides one. Any
     other exception (auth failure, malformed response, a non-429 HTTP
     error, ...) propagates immediately, unretried.
+
+    `rate_limiter` (if given) paces the request *before* the first attempt
+    and publishes the server-requested retry delay back into the shared
+    limiter when a 429 IS received, so a rate-limit no longer only delays
+    the one caller that happened to get it -- every subsequent Gemini call
+    on the same provider waits for the window to clear (see
+    GeminiRateLimiter and "Gemini quota coordination" in
+    docs/PRODUCTION_PIPELINE.md). The retry loop deliberately does NOT
+    re-consult the limiter between attempts: its own sleep already honors
+    the saturation window, so requerying would double-sleep.
     """
     attempts_made = 0
+    needs_wait = True
     while True:
+        if needs_wait and rate_limiter is not None:
+            rate_limiter.wait_until_allowed()
+        needs_wait = True
         try:
-            return operation()
+            result = operation()
+            if rate_limiter is not None:
+                rate_limiter.record_success()
+            return result
         except Exception as exc:  # noqa: BLE001 -- only 429s are handled here; everything else re-raises below
             if not _is_rate_limited(exc) or attempts_made >= max_retries:
                 raise
@@ -330,8 +373,115 @@ def _call_with_retry(operation: Callable[[], _T], *, max_retries: int = GEMINI_M
             else:
                 delay = min(delay, GEMINI_MAX_RETRY_DELAY_SECONDS)
             delay += random.uniform(0, delay * GEMINI_RETRY_JITTER_RATIO)
+            if rate_limiter is not None:
+                # Tell the whole shared limiter the window is saturated for
+                # at least this long, so the NEXT Gemini-heavy call (e.g. the
+                # next scene's Vision check, or the next candidate's content
+                # brief) pauses too instead of piling into a still-hot window.
+                rate_limiter.record_rate_limit(delay)
             logger.warning("Gemini rate limited, retrying in %.1f seconds (attempt %d/%d)", delay, attempts_made, max_retries)
             time.sleep(delay)
+            # The sleep above already paced the gap to the retry; the next
+            # top-level operation's wait_until_allowed() will see the recorded
+            # saturation and pause before firing again.
+            needs_wait = False
+
+
+class GeminiRateLimiter:
+    """Coordinates the pacing of every Gemini generate-content call made
+    through one GeminiProvider instance.
+
+    Why this exists: the failed overnight-batch run (see
+    docs/BATCH_MODE.md) hit HTTP 429 "Quota exceeded ...
+    generate_content_free_tier_requests, limit: 20" not because one call
+    misbehaved but because Script + content-brief + per-scene Vision calls
+    were fired back-to-back, saturating Gemini's free-tier 20-requests-per-
+    minute window mid-candidate. Per-call retries alone cannot fix that: by
+    the time one call retries, the window is still hot, so the retry and
+    every other call just pile on again.
+
+    Callers use wait_until_allowed() before each request and record_success()
+    / record_rate_limit(delay) after it. A fresh limiter paces at most one
+    request every MIN_INTERVAL seconds (≈19/min, just under the 20/min cap)
+    and never allows more than MAX_REQUESTS_PER_WINDOW successful requests
+    in any rolling WINDOW_SECONDS. When a 429 is seen, record_rate_limit
+    stores a saturation deadline that wait_until_allowed() enforces for ALL
+    callers (not just the one that got the 429), so the next Gemini-heavy
+    stage does not start while the rate-limit window is still draining.
+
+    Single-threaded pipeline; the lock exists so a future concurrent
+    orchestration cannot double-fire. All sleeps go through this module's
+    `time.sleep`, so tests can monkeypatch
+    `scripts.production.providers.llm.time.sleep` to keep them instant.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_requests_per_window: int = GEMINI_RATE_LIMIT_MAX_PER_WINDOW,
+        window_seconds: float = GEMINI_RATE_LIMIT_WINDOW_SECONDS,
+        min_interval_seconds: float = GEMINI_RATE_LIMIT_MIN_INTERVAL_SECONDS,
+        saturation_margin_seconds: float = GEMINI_RATE_LIMIT_SATURATION_MARGIN_SECONDS,
+        max_single_wait_seconds: float = GEMINI_RATE_LIMIT_MAX_SINGLE_WAIT_SECONDS,
+    ) -> None:
+        self._max_per_window = max_requests_per_window
+        self._window = window_seconds
+        self._min_interval = min_interval_seconds
+        self._saturation_margin = saturation_margin_seconds
+        self._max_single_wait = max_single_wait_seconds
+        self._request_times: deque[float] = deque()
+        self._saturation_until = 0.0
+        self._lock = threading.Lock()
+
+    def wait_until_allowed(self) -> None:
+        """Sleep (bounded) until this request may fire without making the
+        free-tier window worse: the seen-429 saturation deadline, the rolling
+        window capacity, and the minimum interval after the last success are
+        all honored, whichever is the longest."""
+        with self._lock:
+            now = time.monotonic()
+            wait = 0.0
+
+            if self._saturation_until > now:
+                wait = max(wait, self._saturation_until - now + self._saturation_margin)
+
+            while self._request_times and now - self._request_times[0] >= self._window:
+                self._request_times.popleft()
+
+            if len(self._request_times) >= self._max_per_window:
+                wait = max(wait, self._request_times[0] + self._window - now + self._saturation_margin)
+
+            if self._request_times and now - self._request_times[-1] < self._min_interval:
+                wait = max(wait, self._min_interval - (now - self._request_times[-1]))
+
+            if wait > 0:
+                time.sleep(min(wait, self._max_single_wait))
+
+    def record_success(self) -> None:
+        """Record that one generate-content request was accepted by the
+        server (counts toward the free-tier quota and resets the pacing
+        interval watermark)."""
+        with self._lock:
+            now = time.monotonic()
+            while self._request_times and now - self._request_times[0] >= self._window:
+                self._request_times.popleft()
+            self._request_times.append(now)
+            # Keep the deque bounded even if callers stop waiting between
+            # requests for some reason -- stale timestamps are only needed for
+            # the rolling window anyway.
+            while len(self._request_times) > self._max_per_window * 2:
+                self._request_times.popleft()
+
+    def record_rate_limit(self, retry_after_seconds: Optional[float]) -> None:
+        """Publish a rate-limit hit to every caller: the server asked us to
+        wait at least `retry_after_seconds` before the next request (or, when
+        absent, our own backoff estimate), so wait_until_allowed() will now
+        pause until that deadline clears -- not just for this call, but for
+        the next call anywhere on this provider."""
+        if retry_after_seconds is None:
+            return
+        with self._lock:
+            self._saturation_until = max(self._saturation_until, time.monotonic() + retry_after_seconds)
 
 
 def _describe_incomplete_interaction(interaction: Any) -> str:
@@ -360,7 +510,13 @@ class GeminiProvider(LlmProvider):
     this provider never passes.
     """
 
-    def __init__(self, api_key: str, model: str = DEFAULT_GEMINI_MODEL, client: Any = None) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str = DEFAULT_GEMINI_MODEL,
+        client: Any = None,
+        rate_limiter: "Optional[GeminiRateLimiter]" = None,
+    ) -> None:
         if client is None:
             # Imported lazily so importing this module (e.g. for the
             # fabrication guard alone, in tests) never requires the
@@ -370,6 +526,11 @@ class GeminiProvider(LlmProvider):
             client = genai.Client(api_key=api_key)
         self._client = client
         self._model = model
+        # One limiter per provider instance so ALL of its Gemini calls
+        # (content brief, Script Agent, and per-scene Vision) coordinate
+        # against the same free-tier minute -- see GeminiRateLimiter.
+        # Injectable so tests can substitute a tuned/no-op limiter.
+        self._rate_limiter = rate_limiter if rate_limiter is not None else GeminiRateLimiter()
 
     def generate_script(self, prompt: str) -> str:
         interaction = _call_with_retry(
@@ -381,7 +542,8 @@ class GeminiProvider(LlmProvider):
                     "mime_type": "application/json",
                     "schema": SCRIPT_JSON_SCHEMA,
                 },
-            )
+            ),
+            rate_limiter=self._rate_limiter,
         )
         text = getattr(interaction, "output_text", None)
         if not text:
@@ -398,7 +560,8 @@ class GeminiProvider(LlmProvider):
                     "mime_type": "application/json",
                     "schema": CONTENT_BRIEF_SCHEMA,
                 },
-            )
+            ),
+            rate_limiter=self._rate_limiter,
         )
         text = getattr(interaction, "output_text", None)
         if not text:
@@ -432,7 +595,8 @@ class GeminiProvider(LlmProvider):
                     "mime_type": "application/json",
                     "schema": VISION_EVALUATION_SCHEMA,
                 },
-            )
+            ),
+            rate_limiter=self._rate_limiter,
         )
         text = getattr(interaction, "output_text", None)
         if not text:
@@ -448,7 +612,10 @@ class GeminiProvider(LlmProvider):
         plain connectivity/auth failure can never be confused with (or
         masked by) a structured-output or tool-calling problem.
         """
-        interaction = _call_with_retry(lambda: self._client.interactions.create(model=self._model, input=_PING_PROMPT))
+        interaction = _call_with_retry(
+            lambda: self._client.interactions.create(model=self._model, input=_PING_PROMPT),
+            rate_limiter=self._rate_limiter,
+        )
         text = getattr(interaction, "output_text", None)
         if not text:
             raise GeminiPingError(_describe_incomplete_interaction(interaction))

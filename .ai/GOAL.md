@@ -1,72 +1,35 @@
 # Current Goal
 
-Build and validate an autonomous overnight content batch for FrameForge.
+Optimize the overnight batch pipeline to reliably produce 3 candidates under the current Gemini free-tier limit of 20 generate_content requests per minute, without enabling billing.
 
-Goal:
-By the end of this run, the system must be able to autonomously produce 3 distinct high-quality video candidates in one batch so I can review them the next morning and choose which one to publish.
-
-Claude is the content-quality supervisor. Codex is the implementation agent.
+Use the failed run 34720594297 and batch metadata as evidence.
 
 Requirements:
-
-1. Generate 3 distinct video candidates, not minor variations of the same topic.
-2. Before scripting each candidate, define:
-   - target audience
-   - viewer pain/problem
-   - topic angle
-   - 2-3 hook candidates
-   - selected hook and why it should retain attention
-3. Prefer topics with strong practical value, curiosity, buying mistakes, performance problems, myths, optimization, or game/hardware decisions.
-4. Avoid generic or repetitive topics.
-5. Use existing research/topic scoring as the base and improve it only where evidence shows it is weak.
-6. Each rendered candidate must pass:
-   - >=80% meaningful real-media runtime coverage
-   - <=1 consecutive info-card
-   - normal QA
-   - on-topic validation
-   - no fabricated factual claims
-7. If a candidate fails before render because of topic/visual quality, autonomously try another candidate.
-8. If an API quota or external provider blocks further candidates, keep all successfully completed candidates and report the blocker clearly.
-9. Send every successful candidate to Telegram separately.
-10. For each Telegram candidate include a concise summary:
-    - Candidate number
-    - Topic
-    - Target audience
-    - Hook
-    - Duration
-    - Real-media coverage
-    - QA result
-11. Do NOT publicly publish anything.
-12. Do NOT automatically choose a winner for me.
-13. Existing Approve behavior may upload a selected video privately to YouTube, but public publication always requires human action.
-14. Store batch metadata so future agents can compare what topics/hooks were attempted and avoid unnecessary repetition.
-15. Do not build speculative infrastructure unrelated to this overnight batch.
-
-Implementation process:
-- Inspect the current production pipeline and reuse existing components.
-- Claude defines the quality criteria and reviews the plan.
-- Codex implements necessary changes.
-- Claude reviews Codex changes and sends defects back until correct.
-- Run targeted tests during implementation.
-- Run the full pytest suite before shipping.
-- You are approved to create a normal git commit and push validated changes to origin/main.
-- No force push, history rewrite, secret/OAuth changes, billing changes, or public publishing.
-- After push, run the real GitHub Actions production batch using existing GitHub Secrets.
-- Continue autonomously until either:
-  A) 3 successful candidate videos are delivered to Telegram, or
-  B) a genuine external blocker prevents completion.
+- Keep the existing >=80% real-media quality gate.
+- Do not weaken QA or allow rejected/irrelevant media.
+- Reduce Gemini request consumption per candidate.
+- Respect Retry-After / retry timing for 429s.
+- Avoid starting the next Gemini-heavy stage while the rate-limit window is still saturated.
+- Add explicit pacing/rate-limit coordination across Script, content brief, and Vision calls.
+- Reuse/cache Vision decisions where safe.
+- Add a cheaper pre-filter before Vision so only the strongest visual candidates consume Gemini calls.
+- Do not treat a temporary 429 as a permanent batch blocker until a bounded recovery strategy has been exhausted.
+- Preserve all successfully completed candidates if a later candidate fails.
+- Add tests for the rate-limit coordination and recovery behavior.
+- Run the full test suite.
+- You are approved to commit and push validated changes to origin/main.
+- After push, run a real 3-candidate batch and continue until either 3 candidates are delivered to Telegram or a genuine external blocker remains.
+- Do not enable billing, change secrets, or publish publicly.
 
 At the end report:
 STATUS: PASS or STATUS: BLOCKED
+Gemini requests per candidate:
+Rate-limit strategy:
 Candidates produced:
-Topics:
-Hooks:
-Target audiences:
 Real-media coverage:
 Tests:
 Changes:
-External blockers:
-Human action required:
+External blocker:
 
 ## Rules
 

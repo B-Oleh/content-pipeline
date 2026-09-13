@@ -185,7 +185,12 @@ work directory; see docs/PRODUCTION_PIPELINE.md "Duration-based visual gate".
 Overnight batch mode (`production/batch.py`, CLI `scripts.produce_batch`) reuses these
 stages after generating a per-topic content brief. It delivers distinct candidates with
 summaries, persists attempts under `state/production_batch/`, and sends a recap without
-approval polling, winner selection, or publishing. See docs/BATCH_MODE.md.
+approval polling, winner selection, or publishing. See docs/BATCH_MODE.md. Gemini calls
+across the whole batch share one per-provider `GeminiRateLimiter` (providers/llm.py) so
+Script/brief/Vision stay inside the 20-requests-per-minute free-tier window, and a
+transient 429 that survives a call's own retry budget triggers a bounded batch recovery
+(3 rounds, 75s cooldown) instead of immediately aborting the run -- see
+docs/PRODUCTION_PIPELINE.md "Gemini quota coordination".
 
 ### Research and opportunity scoring rules
 

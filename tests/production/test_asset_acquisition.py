@@ -145,10 +145,14 @@ def test_acquires_the_best_metadata_candidate_once_vision_approves_it(tmp_path, 
     pixabay = _FakeProvider(
         "pixabay", {"desktop gpu inside pc case": [_asset("pixabay", "https://pixabay.com/video/desktop-gpu-inside-pc-case-2")]}
     )
-    # Every shortlisted candidate is evaluated now (not just until the
-    # first pass), so both candidates need a programmed response -- pixabay
-    # (better metadata match, evaluated first) approved, pexels rejected.
-    llm = _FakeLlmProvider([_approve(score=90), _reject("unrelated ocean footage")])
+    # The top-metadata candidate (pixabay -- its page URL keyword-matches the
+    # scene/query better, so it is evaluated first) passes Vision at >=
+    # EXACT_MATCH_SCORE, so select_vision_validated_candidate returns it
+    # immediately (early_exit) without spending a Vision call on the second
+    # shortlisted candidate -- the "strongest visual candidate consumes the
+    # Gemini call" trade-off the rate-limit goal adds (see that function's
+    # docstring). The metadata pre-filter still determines shortlist order.
+    llm = _FakeLlmProvider([_approve(score=90)])
 
     acquire_assets([scene], [pexels, pixabay], tmp_path, llm)
 
@@ -159,7 +163,7 @@ def test_acquires_the_best_metadata_candidate_once_vision_approves_it(tmp_path, 
     assert scene.asset_path is not None and scene.asset_path.exists()
     assert len(pixabay.downloaded) == 1
     assert len(pexels.downloaded) == 0
-    assert len(llm.vision_calls) == 2
+    assert len(llm.vision_calls) == 1  # early_exit: only the strongest candidate was Vision-checked
 
 
 def test_queries_multiple_search_terms_not_just_the_first(tmp_path, monkeypatch):
@@ -578,3 +582,34 @@ def test_photo_fallback_after_vision_rejects_video(tmp_path, monkeypatch):
     assert not scene.asset_is_video
     assert scene.media_accepted
     assert [asset for asset, _ in provider.downloaded] == [photo]
+
+
+def test_photo_fallback_skips_candidate_already_evaluated_as_a_video(tmp_path, monkeypatch):
+    """The photo fallback must not spend a second Gemini Vision call on an
+    asset that was already shortlisted and Vision-evaluated as a video for
+    the same scene -- same thumbnail, same context, so the verdict is already
+    settled. A different photo candidate is still evaluated and wins."""
+    _patch_thumbnail_fetch(monkeypatch)
+    query = "gaming desk setup"
+    scene = _scene(0, "A gaming desk setup", [query])
+    # The video search returns `same_asset`; the photo search returns the
+    # SAME thumbnail under a photo page_url, plus a genuinely different photo.
+    same_asset = _asset("pexels", "https://pexels.com/video/gaming-desk-video")
+    same_asset_as_photo = _asset(
+        "pexels", "https://pexels.com/photo/gaming-desk-video", is_video=False,
+        thumbnail_url=same_asset.thumbnail_url,
+    )
+    other_photo = _asset("pexels", "https://pexels.com/photo/different-desk-photo", is_video=False)
+    provider = _FakeProvider(
+        "pexels", {query: [same_asset]}, {query: [same_asset_as_photo, other_photo]},
+    )
+    # Only the video shortlist candidate AND the genuinely different photo
+    # are evaluated: the duplicate-as-photo is skipped (its video verdict was
+    # the sole reason the scene fell through to the photo fallback).
+    llm = _FakeLlmProvider([_reject("not relevant"), _approve(score=95)])
+    acquire_assets([scene], [provider], tmp_path, llm)
+    assert scene.asset_url == other_photo.page_url
+    assert not scene.asset_is_video
+    assert scene.media_accepted
+    assert len(llm.vision_calls) == 2
+    assert [asset for asset, _ in provider.downloaded] == [other_photo]

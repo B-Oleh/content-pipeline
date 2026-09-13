@@ -184,6 +184,7 @@ def select_vision_validated_candidate(
     scene: Scene,
     *,
     cache: Optional[dict[tuple[str, str, Optional[str], str], VisionEvaluation]] = None,
+    early_exit: bool = False,
 ) -> Optional[ScoredCandidate]:
     """Vision makes the final semantic call; `shortlisted` is assumed
     already ordered best-metadata-score-first (see asset_acquisition.py),
@@ -194,6 +195,20 @@ def select_vision_validated_candidate(
     (computer_domain, misleading, VISION_RELEVANCE_THRESHOLD), the one with
     the HIGHEST scene_relevance_score is returned -- e.g. a 72 does not win
     over a 94 just because it was checked first.
+
+    `early_exit=True` (set by asset_acquisition.py, which favors fewer
+    Gemini Vision calls to stay inside the free-tier minute) allows one
+    deliberate optimization of the "best wins" rule: if the FIRST
+    (best-metadata-scored) candidate passes at or above EXACT_MATCH_SCORE --
+    meaning it is already strong enough to be shown full-screen as a
+    real_visual, not merely as a hybrid overlay -- it is returned immediately
+    without spending a Vision call on the remaining candidates. A later
+    candidate could still out-score it (e.g. 94 vs 85), but both would be
+    rendered the exact same way (real_visual, full-screen genuine hardware
+    footage), and the metadata pre-filter has already ranked this the best
+    lexical match for the scene -- so the extra call buys no meaningful
+    quality, only Gemini quota. The cache still records this evaluation, so
+    a later identical thumbnail+context reuses it.
 
     `cache` (created once per acquire_assets() run and passed in by the
     caller so it persists across scenes -- see asset_acquisition.py) avoids
@@ -241,6 +256,17 @@ def select_vision_validated_candidate(
                 "Vision APPROVED %s (score=%d, domain=%s): %s",
                 candidate.asset.page_url, evaluation.scene_relevance_score, evaluation.computer_domain, evaluation.reason,
             )
+            if early_exit and evaluation.scene_relevance_score >= EXACT_MATCH_SCORE:
+                # Strong-enough top-metadata match: shown full-screen as a
+                # real_visual either way, so skip the remaining shortlist to
+                # save a Gemini Vision call (see the early_exit docstring).
+                return replace(
+                    candidate,
+                    reason=(
+                        f"{candidate.reason}; vision approved (score={evaluation.scene_relevance_score}): "
+                        f"{evaluation.reason}"
+                    ),
+                )
             approved.append((candidate, evaluation))
         else:
             logger.info(

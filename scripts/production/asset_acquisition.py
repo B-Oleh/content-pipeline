@@ -266,12 +266,31 @@ def acquire_assets(
     consecutive_info_cards = 0
     for scene in scenes:
         shortlist = _shortlist_candidates(scene, providers, previous_shot_type)
-        approved = select_vision_validated_candidate(llm_provider, shortlist, scene, cache=vision_cache) if shortlist else None
+        approved = select_vision_validated_candidate(
+            llm_provider, shortlist, scene, cache=vision_cache, early_exit=True,
+        ) if shortlist else None
 
         if approved is None and any(c.asset.is_video for c in shortlist):
             photos = _score_all(_collect_candidates(scene, providers, "search_photos"), scene, previous_shot_type)
             photos = sorted(_dedupe_candidates(photos), key=lambda c: c.score, reverse=True)[:SHORTLIST_SIZE]
-            approved = select_vision_validated_candidate(llm_provider, photos, scene, cache=vision_cache) if photos else None
+            # Dedupe photos against the already-Vision-evaluated video
+            # shortlist: the same asset surfaced by both a video and a photo
+            # search is the same thumbnail for the same scene, so its judgment
+            # is already settled (either cached or, worse, an identical second
+            # Vision call). Skipping it here is safe reuse -- see the task's
+            # "reuse/cache Vision decisions where safe".
+            evaluated_identities = {
+                c.asset.thumbnail_url or c.asset.page_url
+                for c in shortlist
+                if c.asset.thumbnail_url or c.asset.page_url
+            }
+            photos = [
+                c for c in photos
+                if (c.asset.thumbnail_url or c.asset.page_url) not in evaluated_identities
+            ]
+            approved = select_vision_validated_candidate(
+                llm_provider, photos, scene, cache=vision_cache, early_exit=True,
+            ) if photos else None
             shortlist += photos
 
         if approved is not None:

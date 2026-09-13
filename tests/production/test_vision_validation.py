@@ -17,6 +17,7 @@ from scripts.production.providers.llm import LlmProvider, VisionEvaluationError
 from scripts.production.providers.visual import AssetResult
 from scripts.production.visual_relevance import ScoredCandidate
 from scripts.production.vision_validation import (
+    EXACT_MATCH_SCORE,
     VISION_RELEVANCE_THRESHOLD,
     VisionEvaluation,
     build_vision_prompt,
@@ -230,6 +231,71 @@ def test_select_vision_validated_candidate_picks_the_highest_scoring_approved_ca
     assert result is not None
     assert result.asset is candidate_b
     assert len(provider.calls) == 3  # every shortlisted candidate was evaluated, not just until the first pass
+
+
+def test_select_vision_validated_candidate_early_exit_skips_remaining_shortlist(monkeypatch):
+    """With early_exit=True, a top-metadata candidate that passes at or above
+    EXACT_MATCH_SCORE is returned immediately -- the remaining shortlist is
+    never asked to spend a Gemini Vision call (the free-tier-moment savings
+    the overnight-batch rate-limit goal requires)."""
+    _patch_fetch(monkeypatch)
+    top = _asset("https://pexels.com/video/strong-top-1")
+    second = _asset("https://pexels.com/video/unchallenged-second-1")
+    provider = _FakeLlmProvider(
+        [json.dumps({"computer_domain": True, "scene_relevance_score": EXACT_MATCH_SCORE, "misleading": False, "reason": "strong match"})]
+    )
+
+    result = select_vision_validated_candidate(
+        provider, [_scored(top), _scored(second)], _scene(), early_exit=True
+    )
+
+    assert result is not None
+    assert result.asset is top
+    assert len(provider.calls) == 1  # second candidate was never evaluated
+
+
+def test_select_vision_validated_candidate_early_exit_still_falls_through_below_exact_match(monkeypatch):
+    """early_exit only fires for a >= EXACT_MATCH_SCORE pass. A top candidate
+    that passes but only as a hybrid (70-84) must still let the rest of the
+    shortlist compete, so a stronger later candidate can still win."""
+    _patch_fetch(monkeypatch)
+    weak = _asset("https://pexels.com/video/hybrid-top-75")
+    strong = _asset("https://pexels.com/video/real-strong-95")
+    provider = _FakeLlmProvider(
+        [
+            json.dumps({"computer_domain": True, "scene_relevance_score": 75, "misleading": False, "reason": "honest hybrid match"}),
+            json.dumps({"computer_domain": True, "scene_relevance_score": 95, "misleading": False, "reason": "exact match"}),
+        ]
+    )
+
+    result = select_vision_validated_candidate(
+        provider, [_scored(weak), _scored(strong)], _scene(), early_exit=True
+    )
+
+    assert result is not None
+    assert result.asset is strong
+    assert len(provider.calls) == 2
+
+
+def test_select_vision_validated_candidate_without_early_exit_still_evaluates_all(monkeypatch):
+    """The default (early_exit=False) keeps the documented "best wins" rule:
+    every candidate is evaluated and the highest passing score is returned,
+    even when the first already cleared EXACT_MATCH_SCORE."""
+    _patch_fetch(monkeypatch)
+    top = _asset("https://pexels.com/video/strong-top-1")
+    second = _asset("https://pexels.com/video/stronger-second-1")
+    provider = _FakeLlmProvider(
+        [
+            json.dumps({"computer_domain": True, "scene_relevance_score": 88, "misleading": False, "reason": "strong"}),
+            json.dumps({"computer_domain": True, "scene_relevance_score": 96, "misleading": False, "reason": "stronger"}),
+        ]
+    )
+
+    result = select_vision_validated_candidate(provider, [_scored(top), _scored(second)], _scene())
+
+    assert result is not None
+    assert result.asset is second
+    assert len(provider.calls) == 2
 
 
 def test_select_vision_validated_candidate_returns_none_when_everything_is_rejected(monkeypatch):

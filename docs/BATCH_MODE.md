@@ -13,6 +13,27 @@ maximum one consecutive info card), rendering, and QA. Visual or QA failures try
 the next topic; external service/tooling blockers stop the batch and preserve
 already delivered candidates.
 
+**Gemini quota coordination.** All Gemini calls for the whole batch go through one
+`GeminiProvider` instance, so its shared `GeminiRateLimiter` (see
+docs/PRODUCTION_PIPELINE.md "Gemini quota coordination") paces content-brief,
+Script-Agent, and per-scene Vision calls against the same 20-requests-per-minute
+free-tier window before they reach the server -- bursts that previously saturated
+the rolling minute mid-candidate (the cause of the failed run this mode was added
+for) are smoothed to a sustainable ~18.75/min. A seen 429's retry window is
+published back into the shared limiter, so the next Gemini-heavy stage waits for
+the window to drain rather than piling on.
+
+**Bounded 429 recovery.** A temporary 429 that survives a single call's own retry
+budget is NOT a batch blocker on first sight. `run_batch()` marks that attempt
+`failed_rate_limit`, leaves any already-delivered candidates untouched, cools down
+`RATE_LIMIT_RECOVERY_COOLDOWN_SECONDS` (75s) so the rate-limit window drains, and
+continues with the next candidate. Only after `MAX_RATE_LIMIT_RECOVERIES` (3)
+recovery rounds with no progress is a persistent 429 promoted to a real batch
+blocker. This is the concrete realization of the goal's "do not treat a temporary
+429 as a permanent batch blocker until a bounded recovery strategy has been
+exhausted": a transient quota hit never costs the overnight run the candidates it
+already delivered.
+
 Each passing video arrives separately in Telegram with its number, topic, audience,
 hook, duration, real-media coverage, and QA result. A final recap reports partial
 completion or blockers. Review and reply in the morning to choose a candidate:

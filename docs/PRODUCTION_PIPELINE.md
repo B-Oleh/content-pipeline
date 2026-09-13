@@ -250,6 +250,26 @@ try/except, where an exhausted retry on one candidate is already treated as a re
 candidate, not a whole-scene failure (see
 "Visuals" below).
 
+**Gemini quota coordination.** Per-call retries alone cannot protect the *free-tier minute*: the
+failed overnight-batch run (see docs/BATCH_MODE.md) saturated the 20-requests-per-minute window not
+with one bad call but with Script + content-brief + per-scene Vision calls fired back-to-back, so by
+the time one call's retry slept, the window was still hot and every call piled on again. Every
+`GeminiProvider` therefore owns one `GeminiRateLimiter` (`providers/llm.py`) shared by ALL of its
+Gemini calls -- `generate_script()`, `generate_content_brief()`, `evaluate_visual_candidate()`, and
+`ping()` pass it to `_call_with_retry()`. `wait_until_allowed()` runs before each first attempt and
+`record_success()` after each accepted call; the limiter paces calls at least
+`GEMINI_RATE_LIMIT_MIN_INTERVAL_SECONDS` (3.2s, ≈18.75/min) apart and never allows more than
+`GEMINI_RATE_LIMIT_MAX_PER_WINDOW` (20) successful calls in any rolling 60s window -- a sustainable
+rate comfortably under the free-tier cap. Critically, when a 429 IS seen inside one call,
+`_call_with_retry()` publishes the server-requested delay (or its own backoff) into the shared
+limiter via `record_rate_limit()`, which sets a saturation deadline that `wait_until_allowed()`
+enforces for EVERY subsequent caller. The next Gemini-heavy stage therefore does not start while the
+rate-limit window is still draining, instead of only the unlucky call that got the 429 pausing. The
+retry loop deliberately does not re-consult the limiter between its own attempts (its own sleep
+already covers the machine's saturation), so the retry gap never double-sleeps. The limiter is
+single-threaded-but-locked so a future concurrent orchestration cannot double-fire; its sleeps all go
+through the module `time.sleep` so tests monkeypatch it (see `tests/production/test_rate_limit.py`).
+
 **Fabrication guard.** The prompt instructs Gemini never to state a specific FPS number, price,
 exact spec, release date, popularity statistic, or performance percentage unless it is in the
 evidence. On top of that instruction, `find_fabrication_risks()` runs a small regex safety net over
@@ -354,12 +374,20 @@ call -- see "Gemini Vision (visual relevance)" below). Gemini returns `{"compute
 `computer_domain` is true, `misleading` is false, AND `scene_relevance_score >=
 VISION_RELEVANCE_THRESHOLD` (70); among every candidate that passes, the one with the **highest**
 `scene_relevance_score` is selected -- a 72 never wins over a 94 just because it was evaluated first.
-This still bounds Gemini Vision calls to at most `SHORTLIST_SIZE` (2) per scene (per the task's
-"only call Vision for the final 2-3 candidates per scene" requirement) rather than every raw search
-hit -- the shortlist size controls cost, not an early-exit. A candidate with no `thumbnail_url`, or
-one whose Vision call itself fails (network, malformed response, or an exhausted 429 retry budget --
-see "Gemini quota resilience" above), is treated as rejected rather than crashing the scene's search
-or silently falling back to the metadata score.
+Vision calls are bounded at `SHORTLIST_SIZE` (2) per scene, and `asset_acquisition.py` now passes
+`early_exit=True`: a candidate that passes at `scene_relevance_score >= EXACT_MATCH_SCORE` (85, i.e.
+the top metadata-ranked candidate earning a strong *real_visual* verdict) is returned immediately and
+the remaining shortlist is never asked to spend a Vision call. This is the single biggest
+per-candidate Gemini-request saving the overnight-batch goal required -- most scenes' best candidate
+is a clean, unambiguous real visual, so most shortlists cost 1 Vision call instead of 2. The `>=85`
+bar is deliberate: a passing-but-hybrid top candidate (70-84) must still let the rest of the
+shortlist compete, so early-exit never lets a weaker on-topic visual beat a stronger one. A candidate
+with no `thumbnail_url`, or one whose Vision call itself fails (network, malformed response, or an
+exhausted 429 retry budget -- see "Gemini quota resilience" above), is treated as rejected rather than
+crashing the scene's search or silently falling back to the metadata score. When the video shortlist
+yields no approved candidate and acquisition falls back to photo search, the photo candidates are
+deduplicated against the video candidates' evaluated identities (`thumbnail_url` or `page_url`) so an
+asset already judged against this scene is never re-judged as a photo in the same run.
 
 `acquire_assets()` also threads one `vision_cache` dict through every scene in the run, so the exact
 same thumbnail+context (image URL, scene narration, on-screen text, and query -- everything that

@@ -142,6 +142,65 @@ def test_local_exception_retries(rig):
     assert result.blocker is None
 
 
+def _rate_limit_error() -> RuntimeError:
+    # Same sanitized shape a real Gemini 429 escapes _call_with_retry with
+    # (see test_gemini_provider's text-fallback tier): no structured fields,
+    # but _is_rate_limited matches the "Error code: 429" text.
+    return RuntimeError(
+        "Error code: 429 - Quota exceeded for "
+        "generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20"
+        "\nPlease retry in 12s."
+    )
+
+
+def test_temporary_rate_limit_recovers_and_continues_to_next_candidate(rig, monkeypatch):
+    """A transient 429 that survives a call's own retry budget must NOT abort
+    the batch: after an explicit cooldown the next candidate is tried, and
+    the batch still reaches batch_size (delivered candidates preserved)."""
+    monkeypatch.setattr(batch, "RATE_LIMIT_RECOVERY_COOLDOWN_SECONDS", 0)
+    brief = rig["brief"].return_value
+    rig["brief"].side_effect = [_rate_limit_error(), brief, brief, brief]
+    result = batch.run_batch(**rig["kwargs"])
+    assert result.blocker is None
+    assert len(result.completed) == 3
+    assert result.attempts[0].status == "failed_rate_limit"
+    assert [a.candidate_number for a in result.completed] == [1, 2, 3]
+    assert rig["client"].send_video.call_count == 3
+
+
+def test_rate_limit_recovery_preserves_delivered_candidate_before_failure(rig, monkeypatch):
+    """Even when a later candidate hits a transient 429, the candidates
+    already delivered to Telegram are kept and the batch still completes."""
+    monkeypatch.setattr(batch, "RATE_LIMIT_RECOVERY_COOLDOWN_SECONDS", 0)
+    brief = rig["brief"].return_value
+    # Candidate 1 delivers normally, candidate 2 hits a 429 (one recovery
+    # round), candidates 3+ deliver.
+    rig["brief"].side_effect = [brief, _rate_limit_error(), brief, brief]
+    result = batch.run_batch(**rig["kwargs"])
+    assert result.blocker is None
+    assert len(result.completed) == 3
+    assert len(result.attempts) == 4
+    assert result.attempts[1].status == "failed_rate_limit"
+    assert [a.candidate_number for a in result.completed] == [1, 2, 3]
+    assert len(rig["client"].send_video.call_args_list) == 3
+
+
+def test_rate_limit_recovery_budget_exhausted_sets_blocker(rig, monkeypatch):
+    """A persistent 429 is only promoted to a batch blocker after the bounded
+    recovery budget (MAX_RATE_LIMIT_RECOVERIES rounds) is exhausted -- not on
+    the first hit."""
+    monkeypatch.setattr(batch, "RATE_LIMIT_RECOVERY_COOLDOWN_SECONDS", 0)
+    rig["brief"].side_effect = [_rate_limit_error()] * 10
+    result = batch.run_batch(**rig["kwargs"])
+    assert not result.completed
+    assert result.blocker is not None
+    assert "rate limit" in result.blocker
+    assert "recovery" in result.blocker
+    assert len(result.attempts) == batch.MAX_RATE_LIMIT_RECOVERIES + 1
+    assert all(a.status == "failed_rate_limit" for a in result.attempts[:-1])
+    assert result.attempts[-1].status == "failed_exception"
+
+
 @pytest.mark.parametrize("available", [0, 1])
 def test_exhaustion_sets_blocker_and_sends_recap(rig, available):
     rig["research"].candidates[:] = rig["topics"][:available]

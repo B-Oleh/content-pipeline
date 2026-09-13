@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +35,17 @@ from scripts.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
 BATCH_SIZE = 3
+
+# Bounded recovery for a temporary Gemini 429 that survives
+# providers/llm.py's own per-call retry budget (a single transient 429 is
+# unlikely once the shared GeminiRateLimiter paces all calls, but required by
+# the goal: a temporary 429 must never be a permanent batch blocker until this
+# bounded recovery strategy is exhausted). Each recovery round cools down
+# before the next candidate and leaves any already-delivered candidates
+# untouched; only after MAX recovery rounds with no progress is the 429
+# promoted to a real batch blocker.
+MAX_RATE_LIMIT_RECOVERIES = 3
+RATE_LIMIT_RECOVERY_COOLDOWN_SECONDS = 75.0
 
 
 @dataclass
@@ -125,6 +137,7 @@ def run_batch(
     attempts: list[BatchAttemptResult] = []
     delivered: list[BatchAttemptResult] = []
     blocker = None
+    rate_limit_recoveries = 0
 
     while len(delivered) < batch_size and remaining and blocker is None:
         logger.info("Stage: Topic selection (attempt=%d)", len(attempts) + 1)
@@ -204,7 +217,28 @@ def run_batch(
         except Exception as exc:
             attempt.status = "failed_exception"
             attempt.failure_reason = _safe_error_message(exc)
-            if _is_external_blocker(exc):
+            if _is_rate_limited(exc):
+                # Do not treat a temporary 429 as a permanent batch blocker
+                # until the bounded recovery budget is spent. Mark the attempt
+                # as failed_rate_limit, cool down so the rate-limit window
+                # drains, and continue to the next candidate -- already
+                # delivered candidates are preserved (they stay in `delivered`).
+                if rate_limit_recoveries >= MAX_RATE_LIMIT_RECOVERIES:
+                    blocker = (
+                        f"Gemini free-tier rate limit persisted after "
+                        f"{MAX_RATE_LIMIT_RECOVERIES} recovery round(s): {attempt.failure_reason}"
+                    )
+                else:
+                    rate_limit_recoveries += 1
+                    attempt.status = "failed_rate_limit"
+                    logger.warning(
+                        "Attempt %d: temporary Gemini rate limit (recovery round %d/%d); "
+                        "cooling down for %.0fs before the next candidate: %s",
+                        attempt.attempt_number, rate_limit_recoveries, MAX_RATE_LIMIT_RECOVERIES,
+                        RATE_LIMIT_RECOVERY_COOLDOWN_SECONDS, attempt.failure_reason,
+                    )
+                    time.sleep(RATE_LIMIT_RECOVERY_COOLDOWN_SECONDS)
+            elif _is_external_blocker(exc):
                 blocker = attempt.failure_reason
         finally:
             logger.info("Attempt %d: %s%s", attempt.attempt_number, attempt.status,
